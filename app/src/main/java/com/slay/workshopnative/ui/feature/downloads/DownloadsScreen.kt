@@ -817,7 +817,9 @@ private fun DownloadTaskSheet(
                     }
                     DetailBlock(
                         label = "源地址",
-                        value = task.runtimeSourceAddress ?: task.sourceUrl,
+                        value = task.runtimeSourceAddress
+                            ?: task.sourceUrl.takeUnless { it.startsWith("steam://publishedfile/") }
+                            ?: "已脱敏",
                     )
                     task.runtimeLastFailure?.takeIf { it.isNotBlank() }?.let { failure ->
                         DetailBlock(label = "最后失败", value = failure)
@@ -1400,7 +1402,7 @@ private fun openDirectoryUri(
         lastError = result.exceptionOrNull()
         Log.w(
             DOWNLOADS_SCREEN_LOG_TAG,
-            "openDirectoryUri failed action=${intent.action} uri=$uri",
+            "openDirectoryUri failed action=${intent.action}",
             lastError,
         )
     }
@@ -1633,8 +1635,8 @@ private fun DownloadTaskEntity.downloadAuthCompactLabel(): String {
     return when (downloadAuthMode) {
         DownloadAuthMode.Anonymous -> "匿名下载"
         DownloadAuthMode.Auto -> boundAccountName?.takeIf { it.isNotBlank() }?.let {
-            "匿名优先·$it"
-        } ?: "匿名优先"
+            "自动优选·$it"
+        } ?: "自动优选"
         DownloadAuthMode.Authenticated -> boundAccountName?.takeIf { it.isNotBlank() }?.let {
             "账号下载·$it"
         } ?: "账号下载"
@@ -1646,9 +1648,9 @@ private fun DownloadTaskEntity.downloadAuthSummary(): String {
         DownloadAuthMode.Anonymous -> "匿名下载"
         DownloadAuthMode.Auto -> {
             if (!boundAccountName.isNullOrBlank()) {
-                "匿名优先，必要时回退到 $boundAccountName"
+                "自动优选，必要时回退到 $boundAccountName"
             } else {
-                "匿名优先，必要时回退到已登录账号"
+                "自动优选，必要时回退到已登录账号"
             }
         }
         DownloadAuthMode.Authenticated -> boundAccountName?.let { "账号下载：$it" } ?: "账号下载"
@@ -1665,13 +1667,15 @@ private fun DownloadTaskEntity.boundAccountSummary(): String {
     return when {
         !boundAccountName.isNullOrBlank() -> boundAccountName
         boundSteamId64 != null && boundSteamId64 > 0L -> "SteamID $boundSteamId64"
+        status !in setOf(DownloadStatus.Queued, DownloadStatus.Running, DownloadStatus.Paused) &&
+            downloadAuthMode != DownloadAuthMode.Anonymous -> "已脱敏"
         downloadAuthMode == DownloadAuthMode.Anonymous -> "访客"
         else -> "当前会话"
     }
 }
 
 private fun DownloadTaskEntity.hasRuntimeDetails(): Boolean {
-    return sourceUrl.isNotBlank() ||
+    return (sourceUrl.isNotBlank() && !sourceUrl.startsWith("steam://publishedfile/")) ||
         !runtimeRouteLabel.isNullOrBlank() ||
         !runtimeTransportLabel.isNullOrBlank() ||
         !runtimeEndpointLabel.isNullOrBlank() ||
@@ -1752,7 +1756,10 @@ private fun DownloadTaskEntity.canPreviewDirectoryInApp(): Boolean {
 }
 
 private fun DownloadTaskEntity.canOpenDirectory(): Boolean {
-    return targetTreeUri != null || isInSystemDownloads() || canPreviewDirectoryInApp()
+    return targetTreeUri != null ||
+        !savedFileUri.isNullOrBlank() ||
+        isInSystemDownloads() ||
+        canPreviewDirectoryInApp()
 }
 
 private fun DownloadTaskEntity.directoryActionLabel(): String {

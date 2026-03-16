@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.documentfile.provider.DocumentFile
@@ -79,11 +80,13 @@ class WorkshopDownloadWorker @AssistedInject constructor(
         private const val PROGRESS_UPDATE_INTERVAL_MS = 500L
         private const val PROGRESS_UPDATE_BYTES_STEP = 512L * 1024L
         private const val PROGRESS_UPDATE_PERCENT_STEP = 1
+        private const val PAUSE_POLL_INTERVAL_MS = 250L
     }
 
     private var runtimeInfoState = RuntimeInfoState()
     private var lastForegroundProgressPercent = Int.MIN_VALUE
     private var lastForegroundPhaseMessage: String? = null
+    private lateinit var pauseStatePoller: PauseStatePoller
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         ensureChannel()
@@ -102,6 +105,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
             ?: DownloadAuthMode.Anonymous
         val boundAccountName = inputData.getString(KEY_BOUND_ACCOUNT_NAME)
         val boundSteamId64 = inputData.getLong(KEY_BOUND_STEAM_ID64, 0L).takeIf { it > 0L }
+        pauseStatePoller = PauseStatePoller(taskId)
         Log.i(
             LOG_TAG,
             "doWork start taskId=$taskId publishedFileId=$publishedFileId appId=$appId hasUrl=${url.isNotBlank()} manifest=$contentManifestId authMode=$downloadAuthMode",
@@ -180,26 +184,36 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                 val latest = downloadTaskDao.getById(taskId) ?: existing
                 val isPaused = throwable.isPauseSignal() || latest.pauseRequested
                 if (isPaused) {
-                    Log.i(LOG_TAG, "Download paused for $title")
+                    Log.i(LOG_TAG, "Download paused taskId=$taskId")
                 } else {
-                    Log.e(LOG_TAG, "Download failed for $title", throwable)
+                    Log.e(LOG_TAG, "Download failed taskId=$taskId", throwable)
                 }
                 val status = when {
                     isPaused -> DownloadStatus.Paused
                     isStopped -> DownloadStatus.Cancelled
                     else -> DownloadStatus.Failed
                 }
-                downloadTaskDao.upsert(
-                    latest.copy(
+                if (isPaused) {
+                    downloadTaskDao.upsert(
+                        latest.copy(
+                            status = status,
+                            pauseRequested = false,
+                            errorMessage = "已暂停",
+                            updatedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                } else {
+                    downloadTaskDao.finish(
+                        taskId = taskId,
                         status = status,
-                        pauseRequested = false,
-                        errorMessage = when {
-                            isPaused -> "已暂停"
-                            else -> throwable.toUserMessage("下载失败")
-                        },
+                        savedFileUri = latest.savedFileUri,
+                        errorMessage = throwable.toUserMessage("下载失败"),
+                        progressPercent = latest.progressPercent,
+                        bytesDownloaded = latest.bytesDownloaded,
+                        totalBytes = latest.totalBytes,
                         updatedAt = System.currentTimeMillis(),
-                    ),
-                )
+                    )
+                }
                 if (isPaused) {
                     Result.success()
                 } else {
@@ -285,7 +299,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                                     bytesDownloaded = bytesDownloaded,
                                     totalBytes = totalBytes,
                                 )
-                                if (isPauseRequested(taskId)) {
+                                if (pauseStatePoller.shouldPause()) {
                                     stream.flush()
                                     progressReporter.report(
                                         bytesDownloaded = bytesDownloaded,
@@ -446,7 +460,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                     }
                 },
                 shouldPause = {
-                    isPauseRequested(taskId)
+                    pauseStatePoller.shouldPause()
                 },
                 onProgress = { downloaded, total ->
                     bytesDownloaded = downloaded
@@ -577,10 +591,6 @@ class WorkshopDownloadWorker @AssistedInject constructor(
         }
     }
 
-    private suspend fun isPauseRequested(taskId: String): Boolean {
-        return downloadTaskDao.getById(taskId)?.pauseRequested == true
-    }
-
     private fun Throwable?.isPauseSignal(): Boolean {
         return generateSequence(this) { it.cause }.any { it is DownloadPausedException }
     }
@@ -708,6 +718,27 @@ class WorkshopDownloadWorker @AssistedInject constructor(
             lastFlushedTotal = totalBytes
             lastFlushedPercent = progressPercent
             lastFlushedAtMs = now
+        }
+    }
+
+    private inner class PauseStatePoller(
+        private val taskId: String,
+    ) {
+        private var lastCheckedAtMs = Long.MIN_VALUE
+        private var lastKnownPauseRequested = false
+
+        suspend fun shouldPause(forceRefresh: Boolean = false): Boolean {
+            val now = SystemClock.elapsedRealtime()
+            if (
+                !forceRefresh &&
+                lastCheckedAtMs != Long.MIN_VALUE &&
+                now - lastCheckedAtMs < PAUSE_POLL_INTERVAL_MS
+            ) {
+                return lastKnownPauseRequested
+            }
+            lastKnownPauseRequested = downloadTaskDao.isPauseRequested(taskId) == true
+            lastCheckedAtMs = now
+            return lastKnownPauseRequested
         }
     }
 }

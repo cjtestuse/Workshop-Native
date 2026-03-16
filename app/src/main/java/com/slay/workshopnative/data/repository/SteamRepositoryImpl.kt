@@ -48,6 +48,10 @@ class SteamRepositoryImpl @Inject constructor(
         sessionManager.logout()
     }
 
+    override suspend fun clearOwnedGamesCache() {
+        sessionManager.clearOwnedGamesCache()
+    }
+
     override suspend fun switchSavedAccount(accountKey: String): Result<Unit> {
         return runCatching { sessionManager.switchSavedAccount(accountKey) }
     }

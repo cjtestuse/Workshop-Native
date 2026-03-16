@@ -78,6 +78,7 @@ private enum class SettingsDestination {
     Workshop,
     Access,
     Update,
+    DataPrivacy,
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -146,7 +147,7 @@ fun SettingsScreen(
                     summary = buildString {
                         append("${uiState.downloadChunkConcurrency} 线程")
                         append(" · ")
-                        append(if (uiState.preferAnonymousDownloads) "匿名优先" else "账号优先")
+                        append(if (uiState.preferAnonymousDownloads) "自动优选" else "账号优先")
                         append(" · ")
                         append(uiState.cdnTransportPreference.transportLabel())
                     },
@@ -175,6 +176,11 @@ fun SettingsScreen(
                     summary = uiState.updateSummary ?: "当前版本 ${uiState.currentVersionName}",
                     onClick = { activeDestination = SettingsDestination.Update },
                 )
+                SettingsOverviewRow(
+                    title = "数据与隐私",
+                    summary = uiState.maintenanceSummary ?: "查看本地保存内容，清理缓存、登录状态和下载诊断。",
+                    onClick = { activeDestination = SettingsDestination.DataPrivacy },
+                )
             }
         }
     }
@@ -188,13 +194,15 @@ fun SettingsScreen(
                     SettingsDestination.Workshop -> "创意工坊"
                     SettingsDestination.Access -> "匿名访问"
                     SettingsDestination.Update -> "应用更新"
+                    SettingsDestination.DataPrivacy -> "数据与隐私"
                 },
                 subtitle = when (destination) {
                     SettingsDestination.DownloadLocation -> "控制结果最终整理到哪里。"
-                    SettingsDestination.DownloadStrategy -> "控制并发、匿名优先和 CDN 连接策略。"
+                    SettingsDestination.DownloadStrategy -> "控制并发、自动优选和 CDN 连接策略。"
                     SettingsDestination.Workshop -> "控制每页数量与下载方式检测。"
                     SettingsDestination.Access -> "控制启动时是否默认进入访客模式。"
                     SettingsDestination.Update -> "检查 GitHub Release 上的新版本，并打开下载链接。"
+                    SettingsDestination.DataPrivacy -> "查看本地保存内容，并清理缓存、历史和诊断信息。"
                 },
             ) {
                 when (destination) {
@@ -232,6 +240,15 @@ fun SettingsScreen(
                         onSelectSource = viewModel::savePreferredUpdateSource,
                         onCheckUpdates = viewModel::checkForUpdates,
                         onOpenDownload = openExternalUrl,
+                    )
+
+                    SettingsDestination.DataPrivacy -> DataPrivacyContent(
+                        uiState = uiState,
+                        onClearAccountData = viewModel::clearAllAccountData,
+                        onClearOwnedGamesCache = viewModel::clearOwnedGamesCache,
+                        onClearFavoriteGames = viewModel::clearFavoriteWorkshopGames,
+                        onClearDownloadDiagnostics = viewModel::clearInactiveDownloadDiagnostics,
+                        onClearDownloadHistory = viewModel::clearInactiveDownloadHistory,
                     )
                 }
             }
@@ -656,6 +673,10 @@ private fun UpdateSettingsContent(
         }
     }
 
+    SettingsInlineHint(
+        text = "如果选择 ghproxy.vip、gh.llkk.cc 或 gh-proxy.com，更新请求和 APK 下载会经过第三方代理节点。",
+    )
+
     Button(
         onClick = onCheckUpdates,
         enabled = !uiState.isCheckingUpdates,
@@ -689,6 +710,9 @@ private fun UpdateSettingsContent(
         if (release.publishedAtDisplayText.isNotBlank()) {
             SettingsValuePill(text = "发布时间 ${release.publishedAtDisplayText}")
         }
+        if (release.assets.isNotEmpty()) {
+            SettingsValuePill(text = "APK 资产 ${release.assets.size} 个")
+        }
         uiState.updateMetadataSource?.let { source ->
             SettingsInlineHint(text = "元数据来源：${source.displayName}")
         }
@@ -708,6 +732,16 @@ private fun UpdateSettingsContent(
             }
         }
 
+        if (release.releasePageUrl.isNotBlank()) {
+            OutlinedButton(
+                onClick = { onOpenDownload(release.releasePageUrl) },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+            ) {
+                Text("查看发布页")
+            }
+        }
+
         if (uiState.hasUpdateAvailable) {
             uiState.updateDownloadResolution?.let { resolution ->
                 Button(
@@ -717,9 +751,61 @@ private fun UpdateSettingsContent(
                 ) {
                     Text("前往下载")
                 }
-                SettingsInlineHint(text = "下载来源：${resolution.source.displayName}")
+                SettingsInlineHint(
+                    text = "下载来源：${resolution.source.displayName} · 文件：${resolution.assetName}",
+                )
             } ?: SettingsInlineHint(text = "找到新版本，但暂时没有解析到可访问的下载地址。")
         }
+    }
+}
+
+@Composable
+private fun DataPrivacyContent(
+    uiState: SettingsUiState,
+    onClearAccountData: () -> Unit,
+    onClearOwnedGamesCache: () -> Unit,
+    onClearFavoriteGames: () -> Unit,
+    onClearDownloadDiagnostics: () -> Unit,
+    onClearDownloadHistory: () -> Unit,
+) {
+    SettingsSubsectionTitle(
+        title = "本地保存内容",
+        subtitle = "以下数据只保存在当前设备，用于登录恢复、下载管理和界面体验。",
+    )
+    SettingsInlineHint(text = "登录 refresh token 使用设备本地加密存储，不参与系统备份。")
+    SettingsInlineHint(text = "下载记录会保留结果路径；下载源地址、节点地址等诊断信息可以单独清除。")
+    SettingsInlineHint(text = "为兼容部分 Steam 内容分发节点，应用允许 steamcontent.com 使用明文流量。")
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsSubsectionTitle(
+        title = "清理动作",
+        subtitle = "清理后不会影响应用设置项，但相关数据会在下次使用时重新生成。",
+    )
+    SettingsActionButton(
+        text = "清除全部登录状态",
+        onClick = onClearAccountData,
+    )
+    SettingsActionButton(
+        text = "清除游戏库缓存",
+        onClick = onClearOwnedGamesCache,
+    )
+    SettingsActionButton(
+        text = "清除收藏列表",
+        onClick = onClearFavoriteGames,
+    )
+    SettingsActionButton(
+        text = "清除下载诊断信息",
+        onClick = onClearDownloadDiagnostics,
+    )
+    SettingsActionButton(
+        text = "删除下载历史",
+        onClick = onClearDownloadHistory,
+    )
+
+    uiState.maintenanceSummary?.let { summary ->
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+        SettingsInlineHint(text = summary)
     }
 }
 
@@ -814,8 +900,8 @@ private fun DownloadStrategyContent(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
     SettingsBooleanRow(
-        title = "公开条目优先匿名下载",
-        description = "已登录时也先尝试匿名下载公开条目。",
+        title = "公开条目自动优选下载",
+        description = "匿名会话已预热时优先匿名，否则直接走当前已登录账号。",
         checked = uiState.preferAnonymousDownloads,
         onCheckedChange = onTogglePreferAnonymous,
     )
@@ -987,6 +1073,20 @@ private fun SettingsChoiceChip(
                 MaterialTheme.colorScheme.onSurface
             },
         )
+    }
+}
+
+@Composable
+private fun SettingsActionButton(
+    text: String,
+    onClick: () -> Unit,
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Text(text)
     }
 }
 

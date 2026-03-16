@@ -49,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
@@ -331,10 +332,12 @@ private fun ExploreControlPanel(
                         },
                     )
                     Surface(
-                        modifier = Modifier.clickable(
-                            enabled = !isRefreshing,
-                            onClick = onRefresh,
-                        ),
+                        modifier = Modifier
+                            .focusProperties { canFocus = false }
+                            .clickable(
+                                enabled = !isRefreshing,
+                                onClick = onRefresh,
+                            ),
                         shape = RoundedCornerShape(16.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     ) {
@@ -439,6 +442,7 @@ private fun ExploreGameRow(
             Column(
                 modifier = Modifier
                     .weight(1f)
+                    .focusProperties { canFocus = false }
                     .clickable(onClick = onShowDetails),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
@@ -469,7 +473,12 @@ private fun ExploreGameRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = onToggleFavorite, modifier = Modifier.size(28.dp)) {
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier
+                            .size(28.dp)
+                            .focusProperties { canFocus = false },
+                    ) {
                         Icon(
                             imageVector = if (isFavorite) Icons.Rounded.Bookmark else Icons.Rounded.BookmarkBorder,
                             contentDescription = if (isFavorite) "取消收藏" else "收藏工坊",
@@ -889,7 +898,9 @@ private fun ExploreActionCapsule(
     onClick: () -> Unit,
 ) {
     Surface(
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier
+            .focusProperties { canFocus = false }
+            .clickable(onClick = onClick),
         shape = RoundedCornerShape(14.dp),
         shadowElevation = 0.dp,
         color = Color.Transparent,

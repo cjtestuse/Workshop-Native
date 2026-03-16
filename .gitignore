@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Gradle
+.gradle/
+.kotlin/
+build/
+*/build/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Android local machine config
+local.properties
+
+# Android build outputs
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing files
+*.jks
+*.keystore
+*.p12
+
+# Generated release artifacts
+workshop-native-*.apk
+SHA256SUMS.txt

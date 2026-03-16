@@ -27,6 +27,8 @@ interface SteamRepository {
 
     suspend fun logout()
 
+    suspend fun clearOwnedGamesCache()
+
     suspend fun switchSavedAccount(accountKey: String): Result<Unit>
 
     suspend fun loadOwnedGames(forceRefresh: Boolean = false): Result<List<OwnedGame>>

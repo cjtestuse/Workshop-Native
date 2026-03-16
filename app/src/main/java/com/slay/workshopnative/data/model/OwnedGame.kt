@@ -13,10 +13,7 @@ data class OwnedGame(
     val appId: Int,
     val name: String,
     val iconHash: String,
-    val playtimeForeverMinutes: Int,
-    val lastPlayedEpochSeconds: Int,
     val ownershipSource: OwnershipSource = OwnershipSource.Owned,
-    val lenderSteamId64: Long? = null,
 ) {
     val capsuleUrl: String
         get() = "https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/$appId/capsule_616x353.jpg"

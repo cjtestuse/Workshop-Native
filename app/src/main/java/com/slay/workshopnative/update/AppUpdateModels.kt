@@ -109,13 +109,20 @@ data class AppUpdateReleaseInfo(
     val publishedAtRaw: String?,
     val publishedAtDisplayText: String,
     val notesText: String,
-    val assetName: String,
-    val assetDownloadUrl: String,
+    val releasePageUrl: String,
+    val assets: List<AppUpdateAsset>,
+)
+
+data class AppUpdateAsset(
+    val name: String,
+    val downloadUrl: String,
+    val sizeBytes: Long = 0L,
 )
 
 data class AppUpdateDownloadResolution(
     val source: AppUpdateSource,
     val resolvedUrl: String,
+    val assetName: String,
 )
 
 sealed interface AppUpdateCheckResult {
@@ -136,7 +143,7 @@ sealed interface AppUpdateCheckResult {
 
 object AppUpdateVersioning {
     private val releaseVersionPattern =
-        Regex("""^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-hotfix(\d+))?$""")
+        Regex("""^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-hotfix(\d+))?(?:[-+].*)?$""")
     private val publishedAtFormatter =
         DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.US)
 

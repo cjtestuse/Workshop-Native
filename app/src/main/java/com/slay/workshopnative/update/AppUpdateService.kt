@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -18,6 +19,11 @@ class AppUpdateService @Inject constructor(
     baseClient: OkHttpClient,
     private val json: Json,
 ) {
+    private class HttpStatusException(
+        val statusCode: Int,
+        message: String,
+    ) : IOException(message)
+
     private val client = baseClient.newBuilder()
         .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -30,7 +36,7 @@ class AppUpdateService @Inject constructor(
     ): AppUpdateCheckResult = withContext(Dispatchers.IO) {
         if (!isConfigured()) {
             return@withContext AppUpdateCheckResult.Failure(
-                errorSummary = "尚未配置更新仓库。请先把 BuildConfig 里的 xxxxx 替换成真实 GitHub 仓库。",
+                errorSummary = "尚未配置更新仓库。",
             )
         }
 
@@ -39,11 +45,8 @@ class AppUpdateService @Inject constructor(
         var releaseInfo: AppUpdateReleaseInfo? = null
 
         for (source in AppUpdateSource.metadataCandidates(preferredSource)) {
-            val requestUrl = source.buildUrl(latestReleaseApiUrl())
             try {
-                val responseText = requestText(requestUrl)
-                val parsed = parseLatestRelease(responseText)
-                    ?: throw IOException("更新元数据格式无效。")
+                val parsed = fetchLatestRelease(source)
                 successfulMetadataSource = source
                 releaseInfo = parsed
                 break
@@ -79,7 +82,13 @@ class AppUpdateService @Inject constructor(
             preferredSource = preferredSource,
             metadataSource = metadataSource,
         ) ?: return@withContext AppUpdateCheckResult.Failure(
-            errorSummary = "找到了新版本，但没有解析到可访问的 APK 下载地址。",
+            errorSummary = if (release.assets.isEmpty()) {
+                "找到了新版本，但该 Release 还没有上传 APK 资产。"
+            } else if (selectPreferredAsset(release.assets) == null) {
+                "找到了新版本，但当前安装通道没有匹配的 APK 资产。"
+            } else {
+                "找到了新版本，但没有解析到可访问的 APK 下载地址。"
+            },
             release = release,
             metadataSource = metadataSource,
         )
@@ -93,24 +102,80 @@ class AppUpdateService @Inject constructor(
         )
     }
 
-    internal fun parseLatestRelease(responseText: String): AppUpdateReleaseInfo? {
+    private fun fetchLatestRelease(source: AppUpdateSource): AppUpdateReleaseInfo {
+        val latestUrl = source.buildUrl(latestReleaseApiUrl())
+        val releasesUrl = source.buildUrl(releasesApiUrl())
+
+        val latestResult = runCatching {
+            parseReleasePayload(
+                requestText(latestUrl),
+            ) ?: throw IOException("更新元数据格式无效。")
+        }
+        latestResult.getOrNull()?.let { return it }
+
+        val latestError = latestResult.exceptionOrNull()
+        val fallbackNeeded = latestError is HttpStatusException && latestError.statusCode == 404
+        if (!fallbackNeeded) {
+            throw latestError ?: IOException("无法读取最新 Release。")
+        }
+
+        val fallbackRelease = parseReleaseList(
+            requestText(releasesUrl),
+        )
+        if (fallbackRelease != null) {
+            return fallbackRelease
+        }
+        throw IOException("仓库还没有发布 GitHub Release。")
+    }
+
+    internal fun parseReleasePayload(responseText: String): AppUpdateReleaseInfo? {
         val payload = runCatching {
             json.decodeFromString(GithubReleasePayload.serializer(), responseText)
         }.getOrNull() ?: return null
-        val rawTagName = payload.tagName.trim()
+        return payload.toReleaseInfo()
+    }
+
+    internal fun parseReleaseList(responseText: String): AppUpdateReleaseInfo? {
+        val payloads = runCatching {
+            json.decodeFromString(ListSerializer(GithubReleasePayload.serializer()), responseText)
+        }.getOrNull() ?: return null
+        val preferred = payloads.firstOrNull { !it.draft && !it.prerelease }
+            ?: payloads.firstOrNull { !it.draft }
+            ?: return null
+        return preferred.toReleaseInfo()
+    }
+
+    private fun GithubReleasePayload.toReleaseInfo(): AppUpdateReleaseInfo? {
+        val rawTagName = tagName.trim()
         if (rawTagName.isEmpty()) return null
-        val asset = payload.assets.firstOrNull { it.name.trim().endsWith(".apk", ignoreCase = true) } ?: return null
-        val assetName = asset.name.trim()
-        val assetDownloadUrl = asset.browserDownloadUrl.trim()
-        if (assetName.isEmpty() || assetDownloadUrl.isEmpty()) return null
+        val releasePageUrl = htmlUrl.trim().ifEmpty { githubReleasesPageUrl() }
+        val apkAssets = assets
+            .mapNotNull { asset ->
+                val assetName = asset.name.trim()
+                val assetDownloadUrl = asset.browserDownloadUrl.trim()
+                if (
+                    assetName.isEmpty() ||
+                    assetDownloadUrl.isEmpty() ||
+                    !assetName.endsWith(".apk", ignoreCase = true)
+                ) {
+                    null
+                } else {
+                    AppUpdateAsset(
+                        name = assetName,
+                        downloadUrl = assetDownloadUrl,
+                        sizeBytes = asset.size.coerceAtLeast(0L),
+                    )
+                }
+            }
+            .sortedWith(apkAssetComparator())
         return AppUpdateReleaseInfo(
             rawTagName = rawTagName,
             normalizedVersion = AppUpdateVersioning.normalizeVersionTag(rawTagName),
-            publishedAtRaw = payload.publishedAt?.trim()?.ifEmpty { null },
-            publishedAtDisplayText = AppUpdateVersioning.formatPublishedAt(payload.publishedAt),
-            notesText = AppUpdateVersioning.normalizeReleaseNotesText(payload.body),
-            assetName = assetName,
-            assetDownloadUrl = assetDownloadUrl,
+            publishedAtRaw = publishedAt?.trim()?.ifEmpty { null },
+            publishedAtDisplayText = AppUpdateVersioning.formatPublishedAt(publishedAt),
+            notesText = AppUpdateVersioning.normalizeReleaseNotesText(body),
+            releasePageUrl = releasePageUrl,
+            assets = apkAssets,
         )
     }
 
@@ -119,16 +184,24 @@ class AppUpdateService @Inject constructor(
         preferredSource: AppUpdateSource,
         metadataSource: AppUpdateSource,
     ): AppUpdateDownloadResolution? {
+        val asset = selectPreferredAsset(release.assets) ?: return null
         for (source in AppUpdateSource.downloadCandidates(preferredSource, metadataSource)) {
-            val candidateUrl = source.buildUrl(release.assetDownloadUrl)
+            val candidateUrl = source.buildUrl(asset.downloadUrl)
             if (isDownloadCandidateReachable(candidateUrl)) {
                 return AppUpdateDownloadResolution(
                     source = source,
                     resolvedUrl = candidateUrl,
+                    assetName = asset.name,
                 )
             }
         }
         return null
+    }
+
+    internal fun selectPreferredAsset(assets: List<AppUpdateAsset>): AppUpdateAsset? {
+        return assets
+            .filter(::isAssetCompatibleWithCurrentBuild)
+            .minWithOrNull(apkAssetComparator())
     }
 
     private fun requestText(requestUrl: String): String {
@@ -136,11 +209,12 @@ class AppUpdateService @Inject constructor(
             .url(requestUrl)
             .get()
             .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", USER_AGENT)
             .build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                throw IOException("HTTP ${response.code}")
+                throw HttpStatusException(response.code, "HTTP ${response.code}")
             }
             return response.body?.string().orEmpty()
         }
@@ -178,24 +252,80 @@ class AppUpdateService @Inject constructor(
         return "https://api.github.com/repos/${BuildConfig.UPDATE_GITHUB_OWNER}/${BuildConfig.UPDATE_GITHUB_REPO}/releases/latest"
     }
 
+    private fun releasesApiUrl(): String {
+        return "https://api.github.com/repos/${BuildConfig.UPDATE_GITHUB_OWNER}/${BuildConfig.UPDATE_GITHUB_REPO}/releases?per_page=10"
+    }
+
+    private fun githubReleasesPageUrl(): String {
+        return "https://github.com/${BuildConfig.UPDATE_GITHUB_OWNER}/${BuildConfig.UPDATE_GITHUB_REPO}/releases"
+    }
+
     private fun summarizeError(error: Throwable): String {
+        if (error is HttpStatusException && error.statusCode == 404) {
+            return "仓库还没有发布 GitHub Release。"
+        }
         val message = error.message?.trim().orEmpty()
         return if (message.isNotEmpty()) message else error.javaClass.simpleName
     }
 
     private fun isConfigured(): Boolean {
-        return BuildConfig.UPDATE_GITHUB_OWNER != "xxxxx" &&
-            BuildConfig.UPDATE_GITHUB_REPO != "xxxxx" &&
-            BuildConfig.UPDATE_GITHUB_OWNER.isNotBlank() &&
+        return BuildConfig.UPDATE_GITHUB_OWNER.isNotBlank() &&
             BuildConfig.UPDATE_GITHUB_REPO.isNotBlank()
+    }
+
+    private fun apkAssetComparator(): Comparator<AppUpdateAsset> {
+        return compareBy<AppUpdateAsset>(
+            ::debugBuildMatchPriority,
+            ::releaseBuildMatchPriority,
+            ::universalAssetPriority,
+            { it.sizeBytes.takeIf { size -> size > 0L } ?: Long.MAX_VALUE },
+            { it.name.length },
+        )
+    }
+
+    private fun debugBuildMatchPriority(asset: AppUpdateAsset): Int {
+        val normalized = asset.name.lowercase()
+        return when {
+            BuildConfig.DEBUG && "debug" in normalized -> 0
+            BuildConfig.DEBUG -> 1
+            else -> 0
+        }
+    }
+
+    private fun releaseBuildMatchPriority(asset: AppUpdateAsset): Int {
+        val normalized = asset.name.lowercase()
+        return when {
+            !BuildConfig.DEBUG && "debug" in normalized -> 2
+            "release" in normalized -> 0
+            else -> 1
+        }
+    }
+
+    private fun isAssetCompatibleWithCurrentBuild(asset: AppUpdateAsset): Boolean {
+        val normalized = asset.name.lowercase()
+        val isDebugAsset = "debug" in normalized
+        return if (BuildConfig.DEBUG) isDebugAsset else !isDebugAsset
+    }
+
+    private fun universalAssetPriority(asset: AppUpdateAsset): Int {
+        val normalized = asset.name.lowercase()
+        return when {
+            "universal" in normalized || "all" in normalized -> 0
+            "arm64" in normalized || "arm64-v8a" in normalized -> 1
+            else -> 2
+        }
     }
 
     @Serializable
     private data class GithubReleasePayload(
         @SerialName("tag_name")
         val tagName: String = "",
+        @SerialName("html_url")
+        val htmlUrl: String = "",
         @SerialName("published_at")
         val publishedAt: String? = null,
+        val draft: Boolean = false,
+        val prerelease: Boolean = false,
         val body: String? = null,
         val assets: List<GithubReleaseAsset> = emptyList(),
     )
@@ -203,6 +333,7 @@ class AppUpdateService @Inject constructor(
     @Serializable
     private data class GithubReleaseAsset(
         val name: String = "",
+        val size: Long = 0L,
         @SerialName("browser_download_url")
         val browserDownloadUrl: String = "",
     )

@@ -14,6 +14,9 @@ interface DownloadTaskDao {
     @Query("SELECT * FROM download_tasks WHERE taskId = :taskId LIMIT 1")
     suspend fun getById(taskId: String): DownloadTaskEntity?
 
+    @Query("SELECT pauseRequested FROM download_tasks WHERE taskId = :taskId LIMIT 1")
+    suspend fun isPauseRequested(taskId: String): Boolean?
+
     @Query("SELECT * FROM download_tasks ORDER BY createdAt DESC")
     suspend fun getAll(): List<DownloadTaskEntity>
 
@@ -24,6 +27,30 @@ interface DownloadTaskDao {
         """,
     )
     suspend fun clearInactiveTasks(): Int
+
+    @Query(
+        """
+        UPDATE download_tasks
+        SET sourceUrl = CASE
+                WHEN publishedFileId > 0 THEN 'steam://publishedfile/' || publishedFileId
+                ELSE sourceUrl
+            END,
+            targetTreeUri = NULL,
+            storageRootRef = NULL,
+            boundAccountName = NULL,
+            boundSteamId64 = NULL,
+            runtimeRouteLabel = NULL,
+            runtimeTransportLabel = NULL,
+            runtimeEndpointLabel = NULL,
+            runtimeSourceAddress = NULL,
+            runtimeAttemptCount = 0,
+            runtimeChunkConcurrency = 0,
+            runtimeLastFailure = NULL,
+            updatedAt = :updatedAt
+        WHERE status NOT IN ('Queued', 'Running', 'Paused')
+        """,
+    )
+    suspend fun clearInactiveRuntimeDetails(updatedAt: Long): Int
 
     @Query(
         """
@@ -160,6 +187,17 @@ interface DownloadTaskDao {
         UPDATE download_tasks
         SET status = :status,
             pauseRequested = 0,
+            sourceUrl = CASE
+                WHEN publishedFileId > 0 THEN 'steam://publishedfile/' || publishedFileId
+                ELSE sourceUrl
+            END,
+            targetTreeUri = NULL,
+            boundAccountName = NULL,
+            boundSteamId64 = NULL,
+            storageRootRef = NULL,
+            runtimeEndpointLabel = NULL,
+            runtimeSourceAddress = NULL,
+            runtimeLastFailure = NULL,
             savedFileUri = :savedFileUri,
             errorMessage = :errorMessage,
             progressPercent = :progressPercent,

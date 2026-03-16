@@ -7,6 +7,29 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+fun configuredString(name: String): String? {
+    val fromGradle = (findProperty(name) as String?)?.trim()
+    if (!fromGradle.isNullOrEmpty()) return fromGradle
+    return System.getenv(name)?.trim()?.takeIf { it.isNotEmpty() }
+}
+
+fun configuredInt(name: String, defaultValue: Int): Int =
+    configuredString(name)?.toIntOrNull() ?: defaultValue
+
+val appVersionCode = configuredInt("APP_VERSION_CODE", 1)
+val appVersionName = configuredString("APP_VERSION_NAME") ?: "1.0.0"
+
+val releaseStoreFilePath = configuredString("RELEASE_STORE_FILE")
+val releaseStorePassword = configuredString("RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = configuredString("RELEASE_KEY_ALIAS")
+val releaseKeyPassword = configuredString("RELEASE_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseStoreFilePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.slay.workshopnative"
     compileSdk = 35
@@ -15,17 +38,31 @@ android {
         applicationId = "com.slay.workshopnative"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
-        buildConfigField("String", "UPDATE_GITHUB_OWNER", "\"xxxxx\"")
-        buildConfigField("String", "UPDATE_GITHUB_REPO", "\"xxxxx\"")
+        versionCode = appVersionCode
+        versionName = appVersionName
+        buildConfigField("String", "UPDATE_GITHUB_OWNER", "\"cjtestuse\"")
+        buildConfigField("String", "UPDATE_GITHUB_REPO", "\"Workshop-Native\"")
         multiDexEnabled = true
         multiDexKeepProguard = file("multidex-config.pro")
         vectorDrawables.useSupportLibrary = true
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(checkNotNull(releaseStoreFilePath))
+                storePassword = checkNotNull(releaseStorePassword)
+                keyAlias = checkNotNull(releaseKeyAlias)
+                keyPassword = checkNotNull(releaseKeyPassword)
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

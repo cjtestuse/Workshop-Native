@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
+    <!-- Compatible with Steam content nodes that still require plain HTTP delivery. -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="true">steamcontent.com</domain>
     </domain-config>

@@ -287,6 +287,10 @@ class DownloadsRepositoryImpl @Inject constructor(
         downloadTaskDao.clearInactiveTasks()
     }
 
+    override suspend fun clearInactiveDiagnostics(): Int = withContext(Dispatchers.IO) {
+        downloadTaskDao.clearInactiveRuntimeDetails(updatedAt = System.currentTimeMillis())
+    }
+
     override suspend fun rebindRetryableTasksToCurrentSession() = withContext(Dispatchers.IO) {
         val binding = currentAuthenticatedBinding() ?: return@withContext
         val now = System.currentTimeMillis()

@@ -21,6 +21,8 @@ interface DownloadsRepository {
 
     suspend fun clearInactiveHistory(): Int
 
+    suspend fun clearInactiveDiagnostics(): Int
+
     suspend fun reconcileActiveTasks()
 
     suspend fun rebindRetryableTasksToCurrentSession()

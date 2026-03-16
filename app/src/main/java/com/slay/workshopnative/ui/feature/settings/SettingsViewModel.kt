@@ -9,6 +9,7 @@ import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
 import com.slay.workshopnative.data.preferences.DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY
+import com.slay.workshopnative.data.repository.DownloadsRepository
 import com.slay.workshopnative.data.repository.SteamRepository
 import com.slay.workshopnative.data.preferences.DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS
 import com.slay.workshopnative.data.preferences.SavedSteamAccount
@@ -57,18 +58,21 @@ data class SettingsUiState(
     val updateDownloadResolution: AppUpdateDownloadResolution? = null,
     val hasUpdateAvailable: Boolean = false,
     val updateMetadataSource: AppUpdateSource? = null,
+    val maintenanceSummary: String? = null,
 )
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val preferencesStore: UserPreferencesStore,
     private val steamRepository: SteamRepository,
+    private val downloadsRepository: DownloadsRepository,
     private val okHttpClient: OkHttpClient,
     private val appUpdateService: AppUpdateService,
 ) : ViewModel() {
 
     private val avatarUrl = MutableStateFlow<String?>(null)
     private val updateState = MutableStateFlow(UpdateCheckUiState())
+    private val maintenanceState = MutableStateFlow(MaintenanceUiState())
     private val preferences = preferencesStore.preferences
 
     val uiState: StateFlow<SettingsUiState> = combine(
@@ -76,7 +80,8 @@ class SettingsViewModel @Inject constructor(
         steamRepository.sessionState,
         avatarUrl,
         updateState,
-    ) { prefs, session, avatar, update ->
+        maintenanceState,
+    ) { prefs, session, avatar, update, maintenance ->
         val accountName = session.account?.accountName
             ?.takeIf(String::isNotBlank)
             ?: prefs.accountName
@@ -106,6 +111,7 @@ class SettingsViewModel @Inject constructor(
             updateDownloadResolution = update.downloadResolution,
             hasUpdateAvailable = update.hasUpdateAvailable,
             updateMetadataSource = update.metadataSource,
+            maintenanceSummary = maintenance.summary,
         )
     }.stateIn(
         viewModelScope,
@@ -209,6 +215,61 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun clearOwnedGamesCache() {
+        viewModelScope.launch {
+            steamRepository.clearOwnedGamesCache()
+            maintenanceState.value = MaintenanceUiState(
+                summary = "已清除游戏库缓存，下次进入“我的内容”会重新读取 Steam。",
+            )
+        }
+    }
+
+    fun clearInactiveDownloadDiagnostics() {
+        viewModelScope.launch {
+            val updated = downloadsRepository.clearInactiveDiagnostics()
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (updated > 0) {
+                    "已清除 $updated 条下载记录的诊断信息。"
+                } else {
+                    "没有可清除的下载诊断信息。"
+                },
+            )
+        }
+    }
+
+    fun clearInactiveDownloadHistory() {
+        viewModelScope.launch {
+            val deleted = downloadsRepository.clearInactiveHistory()
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (deleted > 0) {
+                    "已删除 $deleted 条已完成或失败的下载记录。"
+                } else {
+                    "没有可删除的下载历史。"
+                },
+            )
+        }
+    }
+
+    fun clearFavoriteWorkshopGames() {
+        viewModelScope.launch {
+            preferencesStore.clearFavoriteWorkshopGames()
+            maintenanceState.value = MaintenanceUiState(
+                summary = "已清除收藏的工坊游戏列表。",
+            )
+        }
+    }
+
+    fun clearAllAccountData() {
+        viewModelScope.launch {
+            steamRepository.logout()
+            preferencesStore.clearAllAccountData()
+            avatarUrl.value = null
+            maintenanceState.value = MaintenanceUiState(
+                summary = "已清除本地保存的登录状态、已保存账号和游戏库快照。",
+            )
+        }
+    }
+
     fun checkForUpdates() {
         if (updateState.value.isChecking) return
         viewModelScope.launch {
@@ -276,4 +337,8 @@ private data class UpdateCheckUiState(
     val downloadResolution: AppUpdateDownloadResolution? = null,
     val hasUpdateAvailable: Boolean = false,
     val metadataSource: AppUpdateSource? = null,
+)
+
+private data class MaintenanceUiState(
+    val summary: String? = null,
 )

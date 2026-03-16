@@ -369,7 +369,7 @@ class SteamSessionManager @Inject constructor(
         val prefs = preferencesStore.snapshot()
         Log.i(
             LOG_TAG,
-            "bootstrap remember=${prefs.rememberSession} account=${prefs.accountName} hasRefresh=${prefs.refreshToken.isNotBlank()}",
+            "bootstrap remember=${prefs.rememberSession} hasSavedSession=${prefs.accountName.isNotBlank() && prefs.refreshToken.isNotBlank()}",
         )
         preferredConnectionProfileLabel = prefs.lastConnectionProfileLabel
         lastSuccessfulCdnHost = prefs.lastCdnHost
@@ -438,7 +438,7 @@ class SteamSessionManager @Inject constructor(
             lastSuccessfulCdnTransportDirect = prefs.lastCdnTransportDirect
             Log.i(
                 LOG_TAG,
-                "retryRestore remember=${prefs.rememberSession} account=${prefs.accountName} hasRefresh=${prefs.refreshToken.isNotBlank()}",
+                "retryRestore remember=${prefs.rememberSession} hasSavedSession=${prefs.accountName.isNotBlank() && prefs.refreshToken.isNotBlank()}",
             )
             if (!prefs.rememberSession || prefs.refreshToken.isBlank() || prefs.accountName.isBlank()) {
                 _sessionState.value = SteamSessionState(
@@ -473,7 +473,7 @@ class SteamSessionManager @Inject constructor(
 
             Log.i(
                 LOG_TAG,
-                "onAppForegrounded reconnect account=${prefs.accountName} clientMissing=${steamClient == null} connected=$isConnected",
+                "onAppForegrounded reconnect clientMissing=${steamClient == null} connected=$isConnected",
             )
             scheduleSessionRecovery("应用回到前台，正在恢复 Steam 连接")
         }
@@ -492,6 +492,8 @@ class SteamSessionManager @Inject constructor(
     suspend fun logout() = withContext(Dispatchers.IO) {
         Log.i(LOG_TAG, "logout")
         manualLogout = true
+        pendingAccountName = ""
+        pendingRefreshToken = ""
         disconnectCurrentSession()
         preferencesStore.clearSession()
         _sessionState.value = SteamSessionState(
@@ -500,8 +502,14 @@ class SteamSessionManager @Inject constructor(
         )
     }
 
+    suspend fun clearOwnedGamesCache() = withContext(Dispatchers.IO) {
+        ownedGamesCacheSteamId64 = 0L
+        ownedGamesCache = null
+        preferencesStore.clearOwnedGamesSnapshot()
+    }
+
     suspend fun switchSavedAccount(accountKey: String) = withContext(Dispatchers.IO) {
-        Log.i(LOG_TAG, "switchSavedAccount accountKey=$accountKey")
+        Log.i(LOG_TAG, "switchSavedAccount requested")
         val savedAccount = preferencesStore.activateSavedAccount(accountKey)
             ?: error("未找到可恢复的已保存账号")
         manualLogout = false
@@ -562,7 +570,7 @@ class SteamSessionManager @Inject constructor(
             ownedGamesCache
                 ?.takeIf { ownedGamesCacheSteamId64 == cachedSteamId64 && it.isFresh(OWNED_GAMES_CACHE_MS) }
                 ?.let { cached ->
-                    Log.d(LOG_TAG, "loadOwnedGames hit cache steamId64=$cachedSteamId64 count=${cached.value.size}")
+                    Log.d(LOG_TAG, "loadOwnedGames hit cache count=${cached.value.size}")
                     return@withContext cached.value
                 }
         }
@@ -572,7 +580,7 @@ class SteamSessionManager @Inject constructor(
             ownedGamesCache
                 ?.takeIf { ownedGamesCacheSteamId64 == steamId64 && it.isFresh(OWNED_GAMES_CACHE_MS) }
                 ?.let { cached ->
-                    Log.d(LOG_TAG, "loadOwnedGames hit cache after auth steamId64=$steamId64 count=${cached.value.size}")
+                    Log.d(LOG_TAG, "loadOwnedGames hit cache after auth count=${cached.value.size}")
                     return@withContext cached.value
                 }
         }
@@ -758,13 +766,13 @@ class SteamSessionManager @Inject constructor(
         query: WorkshopBrowseQuery,
         forceRefresh: Boolean = false,
     ): WorkshopBrowsePage = withContext(Dispatchers.IO) {
-        Log.d(LOG_TAG, "loadWorkshopBrowsePage appId=$appId query=$query")
+        Log.d(LOG_TAG, "loadWorkshopBrowsePage appId=$appId")
         val cacheKey = workshopBrowseCacheKey(appId, query)
         if (!forceRefresh) {
             workshopBrowsePageCache[cacheKey]
                 ?.takeIf { it.isFresh(WORKSHOP_BROWSE_CACHE_MS) }
                 ?.let { cached ->
-                    Log.d(LOG_TAG, "loadWorkshopBrowsePage hit cache appId=$appId query=$query")
+                    Log.d(LOG_TAG, "loadWorkshopBrowsePage hit cache appId=$appId")
                     return@withContext cached.value
                 }
         }
@@ -783,7 +791,7 @@ class SteamSessionManager @Inject constructor(
             workshopBrowsePageCache[cacheKey]
                 ?.takeIf { it.isFresh(WORKSHOP_BROWSE_CACHE_MS * 4) }
                 ?.let { cached ->
-                    Log.w(LOG_TAG, "loadWorkshopBrowsePage fallback cache appId=$appId query=$query", throwable)
+                    Log.w(LOG_TAG, "loadWorkshopBrowsePage fallback cache appId=$appId", throwable)
                     return@withContext cached.value
                 }
             throw throwable
@@ -871,12 +879,31 @@ class SteamSessionManager @Inject constructor(
             ?: error("该条目没有可下载的 Steam 内容 manifest")
         val appId = item.appId.takeIf { it > 0 } ?: error("无效的 Workshop AppID")
         val prefs = preferencesStore.snapshot()
-        val anonymousFirst = downloadAuthMode == DownloadAuthMode.Anonymous || downloadAuthMode == DownloadAuthMode.Auto
-        val allowAuthenticatedFallback = downloadAuthMode == DownloadAuthMode.Authenticated ||
+        val canUseAuthenticatedPath =
+            _sessionState.value.status == SessionStatus.Authenticated &&
+                (
+                    boundSteamId64 == null ||
+                        boundSteamId64 <= 0L ||
+                        _sessionState.value.account?.steamId64 == boundSteamId64 ||
+                        prefs.steamId64 == boundSteamId64
+                    )
+        val allowAuthenticatedFallback = canUseAuthenticatedPath &&
             (
-                downloadAuthMode == DownloadAuthMode.Auto &&
-                    prefs.allowAuthenticatedDownloadFallback
-            )
+                downloadAuthMode == DownloadAuthMode.Authenticated ||
+                    (
+                        downloadAuthMode == DownloadAuthMode.Auto &&
+                            prefs.allowAuthenticatedDownloadFallback
+                        )
+                )
+        val anonymousSessionWarm =
+            downloadAuthMode == DownloadAuthMode.Auto &&
+                allowAuthenticatedFallback &&
+                hasWarmAnonymousContentSession()
+        val anonymousFirst = when (downloadAuthMode) {
+            DownloadAuthMode.Anonymous -> true
+            DownloadAuthMode.Authenticated -> false
+            DownloadAuthMode.Auto -> !allowAuthenticatedFallback || anonymousSessionWarm
+        }
 
         val storageRoot = createWorkshopStorageRoot(
             stagingTaskId = stagingTaskId,
@@ -886,8 +913,15 @@ class SteamSessionManager @Inject constructor(
             existingRootRef = existingRootRef,
         )
         val chunkPrefetchCount = normalizeDownloadChunkConcurrency(prefs.downloadChunkConcurrency)
+        val transportModes = prioritizedTransportModes(prefs.cdnTransportPreference)
         onStorageRootResolved(storageRoot.resumeRef)
         val failures = mutableListOf<String>()
+
+        if (downloadAuthMode == DownloadAuthMode.Auto && allowAuthenticatedFallback && !anonymousSessionWarm) {
+            appScope.launch {
+                runCatching { prewarmAnonymousContentSession() }
+            }
+        }
 
         if (anonymousFirst) {
             runCatching {
@@ -903,6 +937,8 @@ class SteamSessionManager @Inject constructor(
                     contentAccess = anonymousAccess,
                     storageRoot = storageRoot,
                     chunkPrefetchCount = chunkPrefetchCount,
+                    transportModes = transportModes,
+                    cdnPoolPreference = prefs.cdnPoolPreference,
                     shouldPause = shouldPause,
                     onProgress = onProgress,
                     onRuntimeInfoChanged = onRuntimeInfoChanged,
@@ -935,6 +971,8 @@ class SteamSessionManager @Inject constructor(
                 contentAccess = authenticatedAccess,
                 storageRoot = storageRoot,
                 chunkPrefetchCount = chunkPrefetchCount,
+                transportModes = transportModes,
+                cdnPoolPreference = prefs.cdnPoolPreference,
                 shouldPause = shouldPause,
                 onProgress = onProgress,
                 onRuntimeInfoChanged = onRuntimeInfoChanged,
@@ -980,7 +1018,6 @@ class SteamSessionManager @Inject constructor(
             runCatching {
                 activeConnectionProfile = primaryConnectionProfiles.first()
                 pendingRememberSession = rememberSession
-                preferencesStore.saveLastAccountName(username.trim())
                 connectForInteractiveLogin()
                 authenticateWithCredentials(username.trim(), password, rememberSession)
             }.onFailure { throwable ->
@@ -1043,8 +1080,6 @@ class SteamSessionManager @Inject constructor(
                     appId = game.appid,
                     name = game.name,
                     iconHash = game.imgIconUrl,
-                    playtimeForeverMinutes = game.playtimeForever,
-                    lastPlayedEpochSeconds = game.rtimeLastPlayed,
                     ownershipSource = OwnershipSource.Owned,
                 )
             }
@@ -1116,7 +1151,7 @@ class SteamSessionManager @Inject constructor(
             .flatMap { it.apps.entries }
             .associate { it.toPair() }
 
-        return sharedAppOwners.mapNotNull { (appId, lenderSteamId64) ->
+        return sharedAppOwners.mapNotNull { (appId, _) ->
             val appInfo = appInfos[appId] ?: return@mapNotNull null
             val metadata = extractAppMetadata(appInfo) ?: return@mapNotNull null
             if (!metadata.shouldDisplayInLibrary()) return@mapNotNull null
@@ -1125,10 +1160,7 @@ class SteamSessionManager @Inject constructor(
                 appId = appId,
                 name = metadata.name,
                 iconHash = metadata.iconHash,
-                playtimeForeverMinutes = 0,
-                lastPlayedEpochSeconds = 0,
                 ownershipSource = OwnershipSource.FamilyShared,
-                lenderSteamId64 = lenderSteamId64,
             )
         }
     }
@@ -1357,6 +1389,8 @@ class SteamSessionManager @Inject constructor(
         contentAccess: WorkshopContentAccess,
         storageRoot: WorkshopStorageRoot,
         chunkPrefetchCount: Int,
+        transportModes: List<Boolean>,
+        cdnPoolPreference: CdnPoolPreference,
         shouldPause: suspend () -> Boolean,
         onProgress: suspend (Long, Long) -> Unit,
         onRuntimeInfoChanged: suspend (
@@ -1370,11 +1404,9 @@ class SteamSessionManager @Inject constructor(
         ) -> Unit,
     ) {
         val failures = mutableListOf<String>()
-        val prefs = preferencesStore.snapshot()
-        val transportModes = prioritizedTransportModes()
         val candidateServers = prioritizeServersByUserPreference(
             servers = contentAccess.servers,
-            preference = prefs.cdnPoolPreference,
+            preference = cdnPoolPreference,
         )
         val cdnAuthTokenCache = mutableMapOf<String, String?>()
         var cachedManifest: DepotManifest? = null
@@ -1624,7 +1656,7 @@ class SteamSessionManager @Inject constructor(
         }
 
         var lastError: Throwable? = null
-        prioritizedConnectionProfiles().forEach { profile ->
+        prioritizedAnonymousConnectionProfiles().forEach { profile ->
             val result = runCatching { createAnonymousContentSession(profile) }
             if (result.isSuccess) {
                 return@withLock result.getOrThrow().also { created ->
@@ -1640,6 +1672,13 @@ class SteamSessionManager @Inject constructor(
     private suspend fun prewarmAnonymousContentSession() {
         if (!preferencesStore.snapshot().preferAnonymousDownloads) return
         ensureAnonymousContentSession()
+    }
+
+    private suspend fun hasWarmAnonymousContentSession(): Boolean = anonymousContentSessionMutex.withLock {
+        val existing = anonymousContentSession ?: return@withLock false
+        val now = System.currentTimeMillis()
+        existing.connectionAlive.get() &&
+            now - existing.lastUsedAtMs.get() <= ANONYMOUS_CONTENT_SESSION_IDLE_MS
     }
 
     private suspend fun loadWorkshopContentAccessFromAnonymousSession(
@@ -2021,16 +2060,15 @@ class SteamSessionManager @Inject constructor(
     ): SteamCdnClient {
         val normalizedParallelism = parallelism.coerceIn(1, MAX_DOWNLOAD_CHUNK_CONCURRENCY)
         val dispatcher = Dispatcher().apply {
-            maxRequests = (normalizedParallelism * 2).coerceAtLeast(10)
-            maxRequestsPerHost = (normalizedParallelism + 4).coerceAtLeast(8)
+            maxRequests = (normalizedParallelism * 3).coerceAtLeast(12)
+            maxRequestsPerHost = (normalizedParallelism * 2).coerceAtLeast(10)
         }
         val connectionPool = cdnConnectionPoolCache.getOrPut(forceDirect) {
-            ConnectionPool(16, 5, TimeUnit.MINUTES)
+            ConnectionPool(32, 5, TimeUnit.MINUTES)
         }
         val isolatedHttpClient = okHttpClient.newBuilder()
             .dispatcher(dispatcher)
             .connectionPool(connectionPool)
-            .protocols(listOf(Protocol.HTTP_1_1))
             .connectTimeout(6, TimeUnit.SECONDS)
             .readTimeout(12, TimeUnit.SECONDS)
             .writeTimeout(12, TimeUnit.SECONDS)
@@ -2060,8 +2098,9 @@ class SteamSessionManager @Inject constructor(
         }.getOrDefault(false)
     }
 
-    private suspend fun prioritizedTransportModes(): List<Boolean> {
-        val preference = preferencesStore.snapshot().cdnTransportPreference
+    private fun prioritizedTransportModes(
+        preference: CdnTransportPreference,
+    ): List<Boolean> {
         return when (preference) {
             CdnTransportPreference.PreferDirect -> {
                 if (hasSystemProxy()) listOf(true, false) else listOf(true)
@@ -2118,6 +2157,26 @@ class SteamSessionManager @Inject constructor(
         return buildList {
             add(preferredProfile)
             addAll(primaryConnectionProfiles.filterNot { it.label == preferredLabel })
+        }
+    }
+
+    private fun prioritizedAnonymousConnectionProfiles(): List<ConnectionProfile> {
+        val tcpFirstOrder = listOf(
+            "tcp-directory",
+            "tcp-seeded",
+            "tcp+ws-directory",
+            "ws-directory",
+            "ws-seeded",
+        )
+        val orderedProfiles = tcpFirstOrder.mapNotNull { label ->
+            primaryConnectionProfiles.firstOrNull { it.label == label }
+        }
+        val preferredLabel = preferredConnectionProfileLabel ?: return orderedProfiles
+        val preferredProfile = orderedProfiles.firstOrNull { it.label == preferredLabel }
+            ?: return orderedProfiles
+        return buildList {
+            add(preferredProfile)
+            addAll(orderedProfiles.filterNot { it.label == preferredLabel })
         }
     }
 
@@ -2424,7 +2483,7 @@ class SteamSessionManager @Inject constructor(
         password: String,
         rememberSession: Boolean,
     ) {
-        Log.i(LOG_TAG, "authenticateWithCredentials username=$username remember=$rememberSession")
+        Log.i(LOG_TAG, "authenticateWithCredentials remember=$rememberSession")
         _sessionState.value = _sessionState.value.copy(
             status = SessionStatus.Authenticating,
             errorMessage = null,
@@ -2480,7 +2539,7 @@ class SteamSessionManager @Inject constructor(
     ) {
         Log.i(
             LOG_TAG,
-            "loginWithRefreshTokenInternal account=$accountName clientId=$clientId restore=$restore remember=$pendingRememberSession tokenLength=${refreshToken.length}",
+            "loginWithRefreshTokenInternal restore=$restore remember=$pendingRememberSession hasClientId=${clientId > 0L}",
         )
         ensureConnected()
 
@@ -2511,7 +2570,7 @@ class SteamSessionManager @Inject constructor(
 
         val result = logonDeferred?.await() ?: error("Steam 登录状态缺失")
         val account = result.getOrThrow()
-        Log.i(LOG_TAG, "loginWithRefreshTokenInternal success steamId64=${account.steamId64}")
+        Log.i(LOG_TAG, "loginWithRefreshTokenInternal success")
 
         preferencesStore.saveSession(
             accountName = account.accountName,
@@ -2620,7 +2679,7 @@ class SteamSessionManager @Inject constructor(
             ?: pendingRefreshToken.takeIf(String::isNotBlank)
         Log.d(
             LOG_TAG,
-            "ensureAuthenticated status=${_sessionState.value.status} account=$accountName hasRefresh=${!refreshToken.isNullOrBlank()} remember=${prefs.rememberSession}",
+            "ensureAuthenticated status=${_sessionState.value.status} hasAccount=${!accountName.isNullOrBlank()} hasRefresh=${!refreshToken.isNullOrBlank()} remember=${prefs.rememberSession}",
         )
         if (!accountName.isNullOrBlank() && !refreshToken.isNullOrBlank()) {
             pendingRememberSession = prefs.rememberSession

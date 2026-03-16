@@ -169,8 +169,6 @@ fun LibraryScreen(
                                 appId = game.appId,
                                 name = game.name,
                                 iconHash = "",
-                                playtimeForeverMinutes = 0,
-                                lastPlayedEpochSeconds = 0,
                             )
                         },
                         onToggleFavorite = { game ->

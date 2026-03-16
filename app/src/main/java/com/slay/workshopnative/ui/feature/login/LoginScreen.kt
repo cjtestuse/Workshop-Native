@@ -43,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -77,8 +78,8 @@ fun LoginScreen(
     onContinueAsGuest: () -> Unit,
 ) {
     var username by rememberSaveable { mutableStateOf("") }
-    var password by rememberSaveable { mutableStateOf("") }
-    var authCode by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var authCode by remember { mutableStateOf("") }
     var rememberSession by rememberSaveable { mutableStateOf(true) }
     var passwordVisible by rememberSaveable { mutableStateOf(false) }
 

@@ -17,6 +17,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -24,9 +25,12 @@ import kotlinx.serialization.json.Json
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
-const val DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY = 8
+const val DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY = 12
 const val MIN_DOWNLOAD_CHUNK_CONCURRENCY = 1
 const val MAX_DOWNLOAD_CHUNK_CONCURRENCY = 12
 val DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS = listOf(1, 2, 4, 6, 8, 12)
@@ -102,6 +106,7 @@ data class OwnedGamesSnapshot(
 class UserPreferencesStore @Inject constructor(
     private val dataStore: DataStore<Preferences>,
     private val json: Json,
+    private val secureSessionStore: SecureSessionStore,
 ) {
     private companion object {
         val ACCOUNT_NAME = stringPreferencesKey("account_name")
@@ -131,28 +136,37 @@ class UserPreferencesStore @Inject constructor(
         val OWNED_GAMES_SNAPSHOT_JSON = stringPreferencesKey("owned_games_snapshot_json")
     }
 
+    private val legacySecretsMigrationMutex = Mutex()
+
+    @Volatile
+    private var legacySecretsMigrated = false
+
     val preferences: Flow<UserPreferences> = dataStore.data
         .catch { throwable ->
             if (throwable is IOException) emit(emptyPreferences()) else throw throwable
         }
         .map { prefs ->
+            val activeSessionProfile = secureSessionStore.readActiveSessionProfile()
+            val activeRefreshToken = secureSessionStore.readActiveRefreshToken()
+                .ifBlank { prefs[REFRESH_TOKEN].orEmpty() }
             val sanitizedDownloadTree = sanitizeDownloadTree(
                 uri = prefs[DOWNLOAD_TREE_URI],
                 label = prefs[DOWNLOAD_TREE_LABEL],
             )
             val savedAccounts = buildSavedAccounts(
-                accountName = prefs[ACCOUNT_NAME].orEmpty(),
-                refreshToken = prefs[REFRESH_TOKEN].orEmpty(),
-                clientId = prefs[CLIENT_ID] ?: 0,
-                steamId64 = prefs[STEAM_ID64] ?: 0,
+                accountName = activeSessionProfile.accountName,
+                refreshToken = activeRefreshToken,
+                clientId = activeSessionProfile.clientId,
+                steamId64 = activeSessionProfile.steamId64,
                 rememberSession = prefs[REMEMBER_SESSION] ?: true,
-                encodedAccounts = prefs[SAVED_ACCOUNTS_JSON],
+                persistedAccounts = secureSessionStore.readSavedAccountsMetadata(),
+                legacyEncodedAccounts = prefs[SAVED_ACCOUNTS_JSON],
             )
             UserPreferences(
-                accountName = prefs[ACCOUNT_NAME].orEmpty(),
-                refreshToken = prefs[REFRESH_TOKEN].orEmpty(),
-                clientId = prefs[CLIENT_ID] ?: 0,
-                steamId64 = prefs[STEAM_ID64] ?: 0,
+                accountName = activeSessionProfile.accountName,
+                refreshToken = activeRefreshToken,
+                clientId = activeSessionProfile.clientId,
+                steamId64 = activeSessionProfile.steamId64,
                 rememberSession = prefs[REMEMBER_SESSION] ?: true,
                 savedAccounts = savedAccounts,
                 defaultGuestMode = prefs[DEFAULT_GUEST_MODE] ?: true,
@@ -181,8 +195,12 @@ class UserPreferencesStore @Inject constructor(
                 preferredUpdateSource = AppUpdateSource.normalizePreferredSource(prefs[PREFERRED_UPDATE_SOURCE]),
             )
         }
+        .flowOn(Dispatchers.IO)
 
-    suspend fun snapshot(): UserPreferences = preferences.first()
+    suspend fun snapshot(): UserPreferences {
+        migrateLegacySecretsIfNeeded()
+        return preferences.first()
+    }
 
     suspend fun saveSession(
         accountName: String,
@@ -191,36 +209,62 @@ class UserPreferencesStore @Inject constructor(
         steamId64: Long,
         rememberSession: Boolean,
     ) {
-        dataStore.edit { prefs ->
-            val now = System.currentTimeMillis()
-            val currentAccounts = decodeSavedAccounts(prefs[SAVED_ACCOUNTS_JSON])
-            prefs[ACCOUNT_NAME] = accountName
-            prefs[CLIENT_ID] = clientId
-            prefs[STEAM_ID64] = steamId64
-            prefs[REMEMBER_SESSION] = rememberSession
-            if (rememberSession) {
-                prefs[REFRESH_TOKEN] = refreshToken
-                val updatedAccount = SavedSteamAccount(
+        migrateLegacySecretsIfNeeded()
+        val currentAccounts = snapshot().savedAccounts
+        val updatedAccounts = if (rememberSession) {
+            currentAccounts.upsert(
+                SavedSteamAccount(
                     accountName = accountName,
                     refreshToken = refreshToken,
                     clientId = clientId,
                     steamId64 = steamId64,
                     rememberSession = true,
-                    lastUsedAtMs = now,
-                )
-                prefs[SAVED_ACCOUNTS_JSON] = encodeSavedAccounts(
-                    currentAccounts.upsert(updatedAccount),
-                )
-            } else {
-                prefs.remove(REFRESH_TOKEN)
-                prefs[SAVED_ACCOUNTS_JSON] = encodeSavedAccounts(
-                    currentAccounts.filterNot { it.matches(accountName, steamId64) },
-                )
-            }
+                    lastUsedAtMs = System.currentTimeMillis(),
+                ),
+            )
+        } else {
+            currentAccounts.filterNot { it.matches(accountName, steamId64) }
+        }
+
+        if (rememberSession) {
+            secureSessionStore.writeActiveSessionProfile(
+                PersistedActiveSteamSession(
+                    accountName = accountName,
+                    clientId = clientId,
+                    steamId64 = steamId64,
+                ),
+            )
+            secureSessionStore.writeActiveRefreshToken(refreshToken)
+            secureSessionStore.writeSavedAccountRefreshToken(
+                accountIdentityKey(accountName, steamId64),
+                refreshToken,
+            )
+            secureSessionStore.writeSavedAccountsMetadata(
+                sanitizeSavedAccounts(updatedAccounts).map { it.toPersisted() },
+            )
+        } else {
+            secureSessionStore.clearActiveSessionProfile()
+            secureSessionStore.clearActiveRefreshToken()
+            secureSessionStore.removeSavedAccountRefreshToken(
+                accountIdentityKey(accountName, steamId64),
+            )
+            secureSessionStore.writeSavedAccountsMetadata(
+                sanitizeSavedAccounts(updatedAccounts).map { it.toPersisted() },
+            )
+        }
+
+        dataStore.edit { prefs ->
+            prefs[REMEMBER_SESSION] = rememberSession
+            prefs.remove(ACCOUNT_NAME)
+            prefs.remove(REFRESH_TOKEN)
+            prefs.remove(CLIENT_ID)
+            prefs.remove(STEAM_ID64)
+            prefs.remove(SAVED_ACCOUNTS_JSON)
         }
     }
 
     suspend fun clearSession() {
+        migrateLegacySecretsIfNeeded()
         dataStore.edit { prefs ->
             prefs.remove(ACCOUNT_NAME)
             prefs.remove(REFRESH_TOKEN)
@@ -230,12 +274,41 @@ class UserPreferencesStore @Inject constructor(
             prefs.remove(OWNED_GAMES_SNAPSHOT_SAVED_AT_MS)
             prefs.remove(OWNED_GAMES_SNAPSHOT_JSON)
         }
+        secureSessionStore.clearActiveSessionProfile()
+        secureSessionStore.clearActiveRefreshToken()
     }
 
-    suspend fun saveLastAccountName(accountName: String) {
+    suspend fun clearAllAccountData() {
+        migrateLegacySecretsIfNeeded()
         dataStore.edit { prefs ->
-            prefs[ACCOUNT_NAME] = accountName
+            buildSavedAccounts(
+                accountName = secureSessionStore.readActiveSessionProfile().accountName,
+                refreshToken = secureSessionStore.readActiveRefreshToken()
+                    .ifBlank { prefs[REFRESH_TOKEN].orEmpty() },
+                clientId = secureSessionStore.readActiveSessionProfile().clientId,
+                steamId64 = secureSessionStore.readActiveSessionProfile().steamId64,
+                rememberSession = prefs[REMEMBER_SESSION] ?: true,
+                persistedAccounts = secureSessionStore.readSavedAccountsMetadata(),
+                legacyEncodedAccounts = prefs[SAVED_ACCOUNTS_JSON],
+            ).forEach { account ->
+                secureSessionStore.removeSavedAccountRefreshToken(account.identityKey())
+            }
+            prefs.remove(ACCOUNT_NAME)
+            prefs.remove(REFRESH_TOKEN)
+            prefs.remove(CLIENT_ID)
+            prefs.remove(STEAM_ID64)
+            prefs.remove(REMEMBER_SESSION)
+            prefs.remove(SAVED_ACCOUNTS_JSON)
+            prefs.remove(LAST_CONNECTION_PROFILE)
+            prefs.remove(LAST_CDN_HOST)
+            prefs.remove(LAST_CDN_TRANSPORT_DIRECT)
+            prefs.remove(OWNED_GAMES_SNAPSHOT_STEAM_ID64)
+            prefs.remove(OWNED_GAMES_SNAPSHOT_SAVED_AT_MS)
+            prefs.remove(OWNED_GAMES_SNAPSHOT_JSON)
         }
+        secureSessionStore.clearActiveSessionProfile()
+        secureSessionStore.clearActiveRefreshToken()
+        secureSessionStore.clearSavedAccountsMetadata()
     }
 
     suspend fun saveLastConnectionProfile(label: String) {
@@ -267,49 +340,62 @@ class UserPreferencesStore @Inject constructor(
     }
 
     suspend fun activateSavedAccount(accountKey: String): SavedSteamAccount? {
-        var selectedAccount: SavedSteamAccount? = null
+        migrateLegacySecretsIfNeeded()
+        val savedAccounts = snapshot().savedAccounts
+        val target = savedAccounts.firstOrNull { it.stableKey() == accountKey } ?: return null
+        if (target.refreshToken.isBlank()) return null
+        val selectedAccount = target.copy(lastUsedAtMs = System.currentTimeMillis())
+        secureSessionStore.writeActiveSessionProfile(
+            PersistedActiveSteamSession(
+                accountName = target.accountName,
+                clientId = target.clientId,
+                steamId64 = target.steamId64,
+            ),
+        )
+        secureSessionStore.writeActiveRefreshToken(target.refreshToken)
+        secureSessionStore.writeSavedAccountsMetadata(
+            savedAccounts.upsert(selectedAccount).map { it.toPersisted() },
+        )
         dataStore.edit { prefs ->
-            val savedAccounts = buildSavedAccounts(
-                accountName = prefs[ACCOUNT_NAME].orEmpty(),
-                refreshToken = prefs[REFRESH_TOKEN].orEmpty(),
-                clientId = prefs[CLIENT_ID] ?: 0,
-                steamId64 = prefs[STEAM_ID64] ?: 0,
-                rememberSession = prefs[REMEMBER_SESSION] ?: true,
-                encodedAccounts = prefs[SAVED_ACCOUNTS_JSON],
-            )
-            val target = savedAccounts.firstOrNull { it.stableKey() == accountKey } ?: return@edit
-            selectedAccount = target.copy(lastUsedAtMs = System.currentTimeMillis())
-            prefs[ACCOUNT_NAME] = target.accountName
-            prefs[REFRESH_TOKEN] = target.refreshToken
-            prefs[CLIENT_ID] = target.clientId
-            prefs[STEAM_ID64] = target.steamId64
             prefs[REMEMBER_SESSION] = target.rememberSession
-            prefs[SAVED_ACCOUNTS_JSON] = encodeSavedAccounts(savedAccounts.upsert(selectedAccount!!))
+            prefs.remove(ACCOUNT_NAME)
+            prefs.remove(REFRESH_TOKEN)
+            prefs.remove(CLIENT_ID)
+            prefs.remove(STEAM_ID64)
+            prefs.remove(SAVED_ACCOUNTS_JSON)
         }
         return selectedAccount
     }
 
     suspend fun removeSavedAccount(accountKey: String) {
+        migrateLegacySecretsIfNeeded()
+        val currentSnapshot = snapshot()
+        val removedAccounts = currentSnapshot.savedAccounts.filter { it.stableKey() == accountKey }
+        if (removedAccounts.isEmpty()) return
+        val retainedAccounts = currentSnapshot.savedAccounts.filterNot { it.stableKey() == accountKey }
+        val activeProfile = secureSessionStore.readActiveSessionProfile()
+        val activeAccountKey = SavedSteamAccount(
+            accountName = activeProfile.accountName,
+            refreshToken = "",
+            clientId = activeProfile.clientId,
+            steamId64 = activeProfile.steamId64,
+            rememberSession = true,
+            lastUsedAtMs = 0L,
+        ).stableKey()
+        val removedActiveAccount = accountKey == activeAccountKey
+
+        secureSessionStore.writeSavedAccountsMetadata(retainedAccounts.map { it.toPersisted() })
+        removedAccounts.forEach { account ->
+            secureSessionStore.removeSavedAccountRefreshToken(account.identityKey())
+        }
+        if (removedActiveAccount) {
+            secureSessionStore.clearActiveSessionProfile()
+            secureSessionStore.clearActiveRefreshToken()
+        }
+
         dataStore.edit { prefs ->
-            val savedAccounts = buildSavedAccounts(
-                accountName = prefs[ACCOUNT_NAME].orEmpty(),
-                refreshToken = prefs[REFRESH_TOKEN].orEmpty(),
-                clientId = prefs[CLIENT_ID] ?: 0,
-                steamId64 = prefs[STEAM_ID64] ?: 0,
-                rememberSession = prefs[REMEMBER_SESSION] ?: true,
-                encodedAccounts = prefs[SAVED_ACCOUNTS_JSON],
-            )
-            val retainedAccounts = savedAccounts.filterNot { it.stableKey() == accountKey }
-            prefs[SAVED_ACCOUNTS_JSON] = encodeSavedAccounts(retainedAccounts)
-            val activeAccountKey = SavedSteamAccount(
-                accountName = prefs[ACCOUNT_NAME].orEmpty(),
-                refreshToken = prefs[REFRESH_TOKEN].orEmpty(),
-                clientId = prefs[CLIENT_ID] ?: 0L,
-                steamId64 = prefs[STEAM_ID64] ?: 0L,
-                rememberSession = prefs[REMEMBER_SESSION] ?: true,
-                lastUsedAtMs = 0L,
-            ).stableKey()
-            if (accountKey == activeAccountKey) {
+            prefs.remove(SAVED_ACCOUNTS_JSON)
+            if (removedActiveAccount) {
                 prefs.remove(ACCOUNT_NAME)
                 prefs.remove(REFRESH_TOKEN)
                 prefs.remove(CLIENT_ID)
@@ -447,6 +533,20 @@ class UserPreferencesStore @Inject constructor(
         }
     }
 
+    suspend fun clearOwnedGamesSnapshot() {
+        dataStore.edit { prefs ->
+            prefs.remove(OWNED_GAMES_SNAPSHOT_STEAM_ID64)
+            prefs.remove(OWNED_GAMES_SNAPSHOT_SAVED_AT_MS)
+            prefs.remove(OWNED_GAMES_SNAPSHOT_JSON)
+        }
+    }
+
+    suspend fun clearFavoriteWorkshopGames() {
+        dataStore.edit { prefs ->
+            prefs.remove(FAVORITE_WORKSHOP_GAMES_JSON)
+        }
+    }
+
     suspend fun loadOwnedGamesSnapshot(): OwnedGamesSnapshot {
         val prefs = dataStore.data.first()
         return OwnedGamesSnapshot(
@@ -472,11 +572,47 @@ class UserPreferencesStore @Inject constructor(
         }
     }
 
-    private fun decodeSavedAccounts(payload: String?): List<SavedSteamAccount> {
-        if (payload.isNullOrBlank()) return emptyList()
-        return sanitizeSavedAccounts(runCatching {
-            json.decodeFromString<List<SavedSteamAccount>>(payload)
-        }.getOrDefault(emptyList()))
+    private fun decodeSavedAccounts(
+        persistedAccounts: List<PersistedSavedSteamAccount>,
+        legacyPayload: String?,
+    ): List<SavedSteamAccount> {
+        if (persistedAccounts.isNotEmpty()) {
+            return sanitizeSavedAccounts(
+                persistedAccounts.map { persisted ->
+                    SavedSteamAccount(
+                        accountName = persisted.accountName,
+                        refreshToken = secureSessionStore.readSavedAccountRefreshToken(
+                            persisted.identityKey(),
+                        ),
+                        clientId = persisted.clientId,
+                        steamId64 = persisted.steamId64,
+                        rememberSession = persisted.rememberSession,
+                        lastUsedAtMs = persisted.lastUsedAtMs,
+                    )
+                },
+            )
+        }
+        if (legacyPayload.isNullOrBlank()) return emptyList()
+        if (isLegacySavedAccountsPayload(legacyPayload)) {
+            return decodeLegacySavedAccounts(legacyPayload)
+        }
+        decodePersistedSavedAccounts(legacyPayload)?.let { accounts ->
+            return sanitizeSavedAccounts(
+                accounts.map { persisted ->
+                    SavedSteamAccount(
+                        accountName = persisted.accountName,
+                        refreshToken = secureSessionStore.readSavedAccountRefreshToken(
+                            persisted.identityKey(),
+                        ),
+                        clientId = persisted.clientId,
+                        steamId64 = persisted.steamId64,
+                        rememberSession = persisted.rememberSession,
+                        lastUsedAtMs = persisted.lastUsedAtMs,
+                    )
+                },
+            )
+        }
+        return decodeLegacySavedAccounts(legacyPayload)
     }
 
     private fun decodeFavoriteWorkshopGames(payload: String?): List<FavoriteWorkshopGame> {
@@ -494,9 +630,13 @@ class UserPreferencesStore @Inject constructor(
         clientId: Long,
         steamId64: Long,
         rememberSession: Boolean,
-        encodedAccounts: String?,
+        persistedAccounts: List<PersistedSavedSteamAccount>,
+        legacyEncodedAccounts: String?,
     ): List<SavedSteamAccount> {
-        val storedAccounts = decodeSavedAccounts(encodedAccounts)
+        val storedAccounts = decodeSavedAccounts(
+            persistedAccounts = persistedAccounts,
+            legacyPayload = legacyEncodedAccounts,
+        )
         if (accountName.isBlank() || refreshToken.isBlank() || !rememberSession) {
             return storedAccounts
         }
@@ -509,12 +649,6 @@ class UserPreferencesStore @Inject constructor(
             lastUsedAtMs = System.currentTimeMillis(),
         )
         return sanitizeSavedAccounts(storedAccounts.upsert(legacyAccount))
-    }
-
-    private fun encodeSavedAccounts(accounts: List<SavedSteamAccount>): String {
-        return json.encodeToString(
-            sanitizeSavedAccounts(accounts),
-        )
     }
 
     private fun encodeFavoriteWorkshopGames(games: List<FavoriteWorkshopGame>): String {
@@ -546,6 +680,20 @@ class UserPreferencesStore @Inject constructor(
     private fun SavedSteamAccount.matches(accountName: String, steamId64: Long): Boolean {
         return steamId64 > 0L && this.steamId64 == steamId64 ||
             accountName.isNotBlank() && this.accountName.equals(accountName, ignoreCase = true)
+    }
+
+    private fun accountIdentityKey(
+        accountName: String,
+        steamId64: Long,
+    ): String {
+        return SavedSteamAccount(
+            accountName = accountName,
+            refreshToken = "",
+            clientId = 0L,
+            steamId64 = steamId64,
+            rememberSession = true,
+            lastUsedAtMs = 0L,
+        ).identityKey()
     }
 
     private fun sanitizeSavedAccounts(accounts: List<SavedSteamAccount>): List<SavedSteamAccount> {
@@ -602,4 +750,120 @@ class UserPreferencesStore @Inject constructor(
             lastUsedAtMs = maxOf(lastUsedAtMs, other.lastUsedAtMs),
         )
     }
+
+    private fun SavedSteamAccount.toPersisted(): PersistedSavedSteamAccount {
+        return PersistedSavedSteamAccount(
+            accountName = accountName,
+            clientId = clientId,
+            steamId64 = steamId64,
+            rememberSession = rememberSession,
+            lastUsedAtMs = lastUsedAtMs,
+        )
+    }
+
+    private fun PersistedSavedSteamAccount.identityKey(): String {
+        return accountIdentityKey(
+            accountName = accountName,
+            steamId64 = steamId64,
+        )
+    }
+
+    private fun decodePersistedSavedAccounts(payload: String): List<PersistedSavedSteamAccount>? {
+        return runCatching {
+            json.decodeFromString<List<PersistedSavedSteamAccount>>(payload)
+        }.getOrNull()
+    }
+
+    private fun isLegacySavedAccountsPayload(payload: String): Boolean {
+        return "\"refreshToken\"" in payload
+    }
+
+    private fun decodeLegacySavedAccounts(payload: String?): List<SavedSteamAccount> {
+        if (payload.isNullOrBlank()) return emptyList()
+        return sanitizeSavedAccounts(
+            runCatching {
+                json.decodeFromString<List<SavedSteamAccount>>(payload)
+            }.getOrDefault(emptyList()),
+        )
+    }
+
+    private suspend fun migrateLegacySecretsIfNeeded() {
+        if (legacySecretsMigrated) return
+        legacySecretsMigrationMutex.withLock {
+            if (legacySecretsMigrated) return@withLock
+            dataStore.edit { prefs ->
+                val legacyRefreshToken = prefs[REFRESH_TOKEN].orEmpty()
+                val secureActiveProfile = secureSessionStore.readActiveSessionProfile()
+                val secureSavedAccounts = secureSessionStore.readSavedAccountsMetadata()
+                val legacySavedAccounts = decodeSavedAccounts(
+                    persistedAccounts = secureSavedAccounts,
+                    legacyPayload = prefs[SAVED_ACCOUNTS_JSON],
+                )
+                val mergedAccounts = legacySavedAccounts.toMutableList()
+                val legacyActiveProfile = PersistedActiveSteamSession(
+                    accountName = prefs[ACCOUNT_NAME].orEmpty(),
+                    clientId = prefs[CLIENT_ID] ?: 0L,
+                    steamId64 = prefs[STEAM_ID64] ?: 0L,
+                )
+
+                if (
+                    legacyActiveProfile.accountName.isNotBlank() &&
+                    (prefs[REMEMBER_SESSION] ?: true) &&
+                    legacyRefreshToken.isNotBlank()
+                ) {
+                    mergedAccounts += SavedSteamAccount(
+                        accountName = legacyActiveProfile.accountName,
+                        refreshToken = legacyRefreshToken,
+                        clientId = legacyActiveProfile.clientId,
+                        steamId64 = legacyActiveProfile.steamId64,
+                        rememberSession = true,
+                        lastUsedAtMs = System.currentTimeMillis(),
+                    )
+                }
+
+                if (secureActiveProfile.isBlankProfile()) {
+                    if (
+                        (prefs[REMEMBER_SESSION] ?: true) &&
+                        legacyRefreshToken.isNotBlank() &&
+                        !legacyActiveProfile.isBlankProfile()
+                    ) {
+                        secureSessionStore.writeActiveSessionProfile(legacyActiveProfile)
+                    } else {
+                        secureSessionStore.clearActiveSessionProfile()
+                    }
+                }
+
+                if (legacyRefreshToken.isNotBlank()) {
+                    secureSessionStore.writeActiveRefreshToken(legacyRefreshToken)
+                }
+
+                if (mergedAccounts.isNotEmpty()) {
+                    val sanitizedAccounts = sanitizeSavedAccounts(mergedAccounts)
+                    sanitizedAccounts.forEach { account ->
+                        if (account.refreshToken.isNotBlank()) {
+                            secureSessionStore.writeSavedAccountRefreshToken(
+                                account.identityKey(),
+                                account.refreshToken,
+                            )
+                        }
+                    }
+                    secureSessionStore.writeSavedAccountsMetadata(
+                        sanitizedAccounts.map { it.toPersisted() },
+                    )
+                } else if (secureSavedAccounts.isEmpty()) {
+                    secureSessionStore.clearSavedAccountsMetadata()
+                }
+                prefs.remove(ACCOUNT_NAME)
+                prefs.remove(REFRESH_TOKEN)
+                prefs.remove(CLIENT_ID)
+                prefs.remove(STEAM_ID64)
+                prefs.remove(SAVED_ACCOUNTS_JSON)
+            }
+            legacySecretsMigrated = true
+        }
+    }
+}
+
+private fun PersistedActiveSteamSession.isBlankProfile(): Boolean {
+    return accountName.isBlank() && clientId <= 0L && steamId64 <= 0L
 }
