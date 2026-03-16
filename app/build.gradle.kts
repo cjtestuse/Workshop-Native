@@ -50,7 +50,7 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = file(checkNotNull(releaseStoreFilePath))
+                storeFile = rootProject.file(checkNotNull(releaseStoreFilePath))
                 storePassword = checkNotNull(releaseStorePassword)
                 keyAlias = checkNotNull(releaseKeyAlias)
                 keyPassword = checkNotNull(releaseKeyPassword)

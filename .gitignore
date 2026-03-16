@@ -13,6 +13,7 @@ build/
 
 # Android local machine config
 local.properties
+.secrets/
 
 # Android build outputs
 captures/
