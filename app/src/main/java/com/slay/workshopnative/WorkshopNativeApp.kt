@@ -1,0 +1,43 @@
+package com.slay.workshopnative
+
+import android.app.Application
+import coil3.ImageLoader
+import coil3.SingletonImageLoader
+import coil3.disk.DiskCache
+import coil3.memory.MemoryCache
+import androidx.hilt.work.HiltWorkerFactory
+import androidx.work.Configuration
+import dagger.hilt.android.HiltAndroidApp
+import javax.inject.Inject
+import okio.Path.Companion.toOkioPath
+
+@HiltAndroidApp
+class WorkshopNativeApp : Application(), Configuration.Provider {
+
+    @Inject
+    lateinit var workerFactory: HiltWorkerFactory
+
+    override fun onCreate() {
+        super.onCreate()
+        SingletonImageLoader.setSafe { context ->
+            ImageLoader.Builder(context)
+                .memoryCache {
+                    MemoryCache.Builder()
+                        .maxSizePercent(context, 0.2)
+                        .build()
+                }
+                .diskCache {
+                    DiskCache.Builder()
+                        .directory(context.cacheDir.resolve("coil-image-cache").toOkioPath())
+                        .maxSizeBytes(256L * 1024L * 1024L)
+                        .build()
+                }
+                .build()
+        }
+    }
+
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder()
+            .setWorkerFactory(workerFactory)
+            .build()
+}
