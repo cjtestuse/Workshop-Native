@@ -89,6 +89,12 @@ fun LoginScreen(
         }
     }
 
+    LaunchedEffect(sessionState.status, sessionState.challenge?.type, sessionState.challenge?.previousCodeIncorrect) {
+        if (sessionState.status != SessionStatus.AwaitingCode) {
+            authCode = ""
+        }
+    }
+
     val awaitingCode = sessionState.status == SessionStatus.AwaitingCode && sessionState.challenge != null
     val isBusy = sessionState.status == SessionStatus.Connecting || sessionState.status == SessionStatus.Authenticating
     val inputsEnabled = !awaitingCode &&

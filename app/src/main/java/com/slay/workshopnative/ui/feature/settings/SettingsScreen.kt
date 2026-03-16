@@ -74,12 +74,12 @@ import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
 import com.slay.workshopnative.data.preferences.DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS
+import com.slay.workshopnative.ui.AppUpdateUiState
 
 private enum class SettingsDestination {
     DownloadLocation,
     DownloadStrategy,
     Workshop,
-    Update,
     DataPrivacy,
 }
 
@@ -88,6 +88,8 @@ private enum class SettingsDestination {
 fun SettingsScreen(
     paddingValues: PaddingValues,
     isGuestMode: Boolean,
+    appUpdateUiState: AppUpdateUiState,
+    onCheckAppUpdates: () -> Unit,
     onShowLogin: () -> Unit,
     onSwitchSavedAccount: (String) -> Unit,
     onLogout: () -> Unit,
@@ -96,13 +98,6 @@ fun SettingsScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var activeDestination by remember { mutableStateOf<SettingsDestination?>(null) }
-    val openExternalUrl: (String) -> Unit = { url ->
-        runCatching {
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-        }
-    }
 
     val treeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -137,14 +132,14 @@ fun SettingsScreen(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SettingsSectionHeader(
                     title = "应用更新",
-                    subtitle = "只通过 GitHub 官方 Release 检查版本与下载。",
+                    subtitle = "启动时自动检查一次，手动检查后直接弹出更新说明。",
                 )
-                UpdateOverviewCard(
-                    uiState = uiState,
-                    onCheckUpdates = viewModel::checkForUpdates,
-                    onOpenDetails = { activeDestination = SettingsDestination.Update },
-                    onOpenDownload = openExternalUrl,
-                )
+                SettingsPanel {
+                    UpdateSettingsRow(
+                        uiState = appUpdateUiState,
+                        onClick = onCheckAppUpdates,
+                    )
+                }
             }
         }
 
@@ -234,14 +229,12 @@ fun SettingsScreen(
                     SettingsDestination.DownloadLocation -> "下载位置"
                     SettingsDestination.DownloadStrategy -> "下载策略"
                     SettingsDestination.Workshop -> "创意工坊"
-                    SettingsDestination.Update -> "应用更新"
                     SettingsDestination.DataPrivacy -> "数据与隐私"
                 },
                 subtitle = when (destination) {
                     SettingsDestination.DownloadLocation -> "控制结果最终整理到哪里。"
                     SettingsDestination.DownloadStrategy -> "控制并发、自动优选和 CDN 连接策略。"
                     SettingsDestination.Workshop -> "控制每页数量与下载方式检测。"
-                    SettingsDestination.Update -> "检查 GitHub Release 上的新版本，并打开下载链接。"
                     SettingsDestination.DataPrivacy -> "查看本地保存内容，并清理缓存、历史和诊断信息。"
                 },
             ) {
@@ -268,12 +261,6 @@ fun SettingsScreen(
                         uiState = uiState,
                         onPageSizeSelect = viewModel::saveWorkshopPageSize,
                         onToggleAutoResolve = viewModel::saveWorkshopAutoResolveVisibleItems,
-                    )
-
-                    SettingsDestination.Update -> UpdateSettingsContent(
-                        uiState = uiState,
-                        onCheckUpdates = viewModel::checkForUpdates,
-                        onOpenDownload = openExternalUrl,
                     )
 
                     SettingsDestination.DataPrivacy -> DataPrivacyContent(
@@ -693,103 +680,120 @@ private fun SettingsSheetScaffold(
 }
 
 @Composable
-private fun UpdateSettingsContent(
-    uiState: SettingsUiState,
-    onCheckUpdates: () -> Unit,
-    onOpenDownload: (String) -> Unit,
+private fun UpdateSettingsRow(
+    uiState: AppUpdateUiState,
+    onClick: () -> Unit,
 ) {
-    SettingsSubsectionTitle(
-        title = "当前版本",
-        subtitle = uiState.currentVersionName,
-    )
+    val statusLabel = when {
+        uiState.isChecking -> "检查中"
+        uiState.hasUpdateAvailable -> "可更新"
+        uiState.lastCheckSucceeded == true -> "最新"
+        uiState.lastCheckSucceeded == false -> "重试"
+        else -> "检查"
+    }
+    val statusContainerColor = when {
+        uiState.hasUpdateAvailable -> Color(0xFFDCEFD8)
+        uiState.isChecking -> Color(0xFFE8EDF7)
+        uiState.lastCheckSucceeded == false -> Color(0xFFFBE1DD)
+        else -> MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    val statusContentColor = when {
+        uiState.hasUpdateAvailable -> Color(0xFF215B28)
+        uiState.isChecking -> Color(0xFF355A8A)
+        uiState.lastCheckSucceeded == false -> Color(0xFFA03B2C)
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    val summary = when {
+        uiState.isChecking -> "正在连接 GitHub Release 检查新版本。"
+        uiState.hasUpdateAvailable && uiState.release != null ->
+            "发现 ${uiState.release.rawTagName}，点击查看更新说明并前往浏览器下载。"
+        uiState.lastCheckSucceeded == true && uiState.release != null ->
+            "已检查到 ${uiState.release.rawTagName}，当前安装版本已是最新。"
+        !uiState.summary.isNullOrBlank() -> uiState.summary
+        else -> "当前版本 ${uiState.currentVersionName}，应用启动时会自动检查一次更新。"
+    }
+    val metaLine = buildString {
+        append("当前 ")
+        append(uiState.currentVersionName)
+        if (uiState.release != null) {
+            append(" · 最新 ")
+            append(uiState.release.rawTagName)
+        }
+        uiState.metadataSource?.let { source ->
+            append(" · ")
+            append(source.displayName)
+        }
+    }
 
-    SettingsSubsectionTitle(
-        title = "更新来源",
-        subtitle = "仅使用 GitHub 官方 Release 元数据与官方 APK 下载地址。",
-    )
-
-    SettingsInlineHint(
-        text = "不会再通过第三方代理检查更新或下载 APK，减少中间人篡改和请求泄漏风险。",
-    )
-
-    Button(
-        onClick = onCheckUpdates,
-        enabled = !uiState.isCheckingUpdates,
-        modifier = Modifier.fillMaxWidth(),
+    Surface(
+        modifier = Modifier.clickable(enabled = !uiState.isChecking, onClick = onClick),
         shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
     ) {
-        if (uiState.isCheckingUpdates) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
-                strokeWidth = 2.2.dp,
-                color = Color.White,
-            )
-            Text("正在检查", modifier = Modifier.padding(start = 8.dp))
-        } else {
-            Icon(Icons.Rounded.SystemUpdateAlt, contentDescription = null)
-            Text("检查更新", modifier = Modifier.padding(start = 8.dp))
-        }
-    }
-
-    uiState.updateSummary?.let { summary ->
-        SettingsInlineHint(text = summary)
-    }
-
-    uiState.updateRelease?.let { release ->
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
-
-        SettingsSubsectionTitle(
-            title = "最新版本",
-            subtitle = release.rawTagName,
-        )
-        if (release.publishedAtDisplayText.isNotBlank()) {
-            SettingsValuePill(text = "发布时间 ${release.publishedAtDisplayText}")
-        }
-        if (release.assets.isNotEmpty()) {
-            SettingsValuePill(text = "APK 资产 ${release.assets.size} 个")
-        }
-        uiState.updateMetadataSource?.let { source ->
-            SettingsInlineHint(text = "元数据来源：${source.displayName}")
-        }
-
-        if (release.notesText.isNotBlank()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Surface(
                 shape = RoundedCornerShape(18.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+            ) {
+                Box(
+                    modifier = Modifier.size(42.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.SystemUpdateAlt,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    text = release.notesText,
-                    modifier = Modifier.padding(12.dp),
+                    text = "应用更新",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = summary,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = metaLine,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-        }
-
-        if (release.releasePageUrl.isNotBlank()) {
-            OutlinedButton(
-                onClick = { onOpenDownload(release.releasePageUrl) },
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("查看发布页")
-            }
-        }
-
-        if (uiState.hasUpdateAvailable) {
-            uiState.updateDownloadResolution?.let { resolution ->
-                Button(
-                    onClick = { onOpenDownload(resolution.resolvedUrl) },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                ) {
-                    Text("前往下载")
+                if (uiState.isChecking) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.2.dp,
+                    )
                 }
-                SettingsInlineHint(
-                    text = "下载来源：${resolution.source.displayName} · 文件：${resolution.assetName}",
+                SettingsValuePill(
+                    text = statusLabel,
+                    containerColor = statusContainerColor,
+                    contentColor = statusContentColor,
+                    borderColor = statusContentColor.copy(alpha = 0.15f),
                 )
-            } ?: SettingsInlineHint(text = "找到新版本，但暂时没有解析到可访问的下载地址。")
+            }
         }
     }
 }
@@ -1058,158 +1062,6 @@ private fun SettingsBooleanRow(
             checked = checked,
             onCheckedChange = onCheckedChange,
         )
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun UpdateOverviewCard(
-    uiState: SettingsUiState,
-    onCheckUpdates: () -> Unit,
-    onOpenDetails: () -> Unit,
-    onOpenDownload: (String) -> Unit,
-) {
-    val statusLabel = when {
-        uiState.isCheckingUpdates -> "检查中"
-        uiState.hasUpdateAvailable -> "可更新"
-        uiState.updateRelease != null -> "已检查"
-        else -> "官方源"
-    }
-    val statusContainerColor = when {
-        uiState.hasUpdateAvailable -> Color(0xFFDCEFD8)
-        uiState.isCheckingUpdates -> Color(0xFFE8EDF7)
-        else -> MaterialTheme.colorScheme.surfaceContainerHigh
-    }
-    val statusContentColor = when {
-        uiState.hasUpdateAvailable -> Color(0xFF215B28)
-        uiState.isCheckingUpdates -> Color(0xFF355A8A)
-        else -> MaterialTheme.colorScheme.onSurface
-    }
-
-    Surface(
-        shape = RoundedCornerShape(26.dp),
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
-        shadowElevation = 6.dp,
-        tonalElevation = 3.dp,
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                ) {
-                    Box(
-                        modifier = Modifier.size(46.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.SystemUpdateAlt,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                }
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(3.dp),
-                ) {
-                    Text(
-                        text = "当前版本",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Text(
-                        text = uiState.currentVersionName,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-                SettingsValuePill(
-                    text = statusLabel,
-                    containerColor = statusContainerColor,
-                    contentColor = statusContentColor,
-                    borderColor = statusContentColor.copy(alpha = 0.15f),
-                )
-            }
-
-            Text(
-                text = uiState.updateSummary ?: "检查最新 Release、查看版本说明，并跳转 GitHub 官方下载地址。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            uiState.updateRelease?.let { release ->
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    SettingsValuePill(text = "最新 ${release.rawTagName}")
-                    if (release.publishedAtDisplayText.isNotBlank()) {
-                        SettingsValuePill(text = release.publishedAtDisplayText)
-                    }
-                }
-            }
-
-            when {
-                uiState.hasUpdateAvailable && uiState.updateDownloadResolution != null -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = { onOpenDownload(uiState.updateDownloadResolution.resolvedUrl) },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(20.dp),
-                        ) {
-                            Text("前往下载")
-                        }
-                        OutlinedButton(
-                            onClick = onOpenDetails,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(20.dp),
-                        ) {
-                            Text("版本详情")
-                        }
-                    }
-                }
-
-                else -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = onCheckUpdates,
-                            enabled = !uiState.isCheckingUpdates,
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(20.dp),
-                        ) {
-                            if (uiState.isCheckingUpdates) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.2.dp,
-                                    color = Color.White,
-                                )
-                                Text("正在检查", modifier = Modifier.padding(start = 8.dp))
-                            } else {
-                                Text("检查更新")
-                            }
-                        }
-                        if (uiState.updateRelease != null) {
-                            OutlinedButton(
-                                onClick = onOpenDetails,
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(20.dp),
-                            ) {
-                                Text("查看详情")
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

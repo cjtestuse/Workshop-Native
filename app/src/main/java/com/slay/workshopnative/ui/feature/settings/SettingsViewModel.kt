@@ -1,6 +1,5 @@
 package com.slay.workshopnative.ui.feature.settings
 
-import com.slay.workshopnative.BuildConfig
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.slay.workshopnative.core.storage.DEFAULT_DOWNLOAD_FOLDER_NAME
@@ -15,8 +14,6 @@ import com.slay.workshopnative.data.preferences.DOWNLOAD_CHUNK_CONCURRENCY_OPTIO
 import com.slay.workshopnative.data.preferences.SavedSteamAccount
 import com.slay.workshopnative.data.preferences.UserPreferences
 import com.slay.workshopnative.data.preferences.UserPreferencesStore
-import dagger.hilt.android.lifecycle.HiltViewModel
-import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -28,11 +25,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import com.slay.workshopnative.update.AppUpdateCheckResult
-import com.slay.workshopnative.update.AppUpdateDownloadResolution
-import com.slay.workshopnative.update.AppUpdateReleaseInfo
-import com.slay.workshopnative.update.AppUpdateService
-import com.slay.workshopnative.update.AppUpdateSource
+import dagger.hilt.android.lifecycle.HiltViewModel
+import javax.inject.Inject
 
 data class SettingsUiState(
     val accountName: String = "",
@@ -50,13 +44,6 @@ data class SettingsUiState(
     val cdnPoolPreference: CdnPoolPreference = CdnPoolPreference.Auto,
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
     val workshopAutoResolveVisibleItems: Boolean = true,
-    val currentVersionName: String = BuildConfig.VERSION_NAME,
-    val isCheckingUpdates: Boolean = false,
-    val updateSummary: String? = null,
-    val updateRelease: AppUpdateReleaseInfo? = null,
-    val updateDownloadResolution: AppUpdateDownloadResolution? = null,
-    val hasUpdateAvailable: Boolean = false,
-    val updateMetadataSource: AppUpdateSource? = null,
     val maintenanceSummary: String? = null,
 )
 
@@ -66,11 +53,9 @@ class SettingsViewModel @Inject constructor(
     private val steamRepository: SteamRepository,
     private val downloadsRepository: DownloadsRepository,
     private val okHttpClient: OkHttpClient,
-    private val appUpdateService: AppUpdateService,
 ) : ViewModel() {
 
     private val avatarUrl = MutableStateFlow<String?>(null)
-    private val updateState = MutableStateFlow(UpdateCheckUiState())
     private val maintenanceState = MutableStateFlow(MaintenanceUiState())
     private val preferences = preferencesStore.preferences
 
@@ -78,9 +63,8 @@ class SettingsViewModel @Inject constructor(
         preferences,
         steamRepository.sessionState,
         avatarUrl,
-        updateState,
         maintenanceState,
-    ) { prefs, session, avatar, update, maintenance ->
+    ) { prefs, session, avatar, maintenance ->
         val accountName = session.account?.accountName
             ?.takeIf(String::isNotBlank)
             ?: prefs.accountName
@@ -102,13 +86,6 @@ class SettingsViewModel @Inject constructor(
             cdnPoolPreference = prefs.cdnPoolPreference,
             workshopPageSize = prefs.workshopPageSize,
             workshopAutoResolveVisibleItems = prefs.workshopAutoResolveVisibleItems,
-            currentVersionName = BuildConfig.VERSION_NAME,
-            isCheckingUpdates = update.isChecking,
-            updateSummary = update.summary,
-            updateRelease = update.release,
-            updateDownloadResolution = update.downloadResolution,
-            hasUpdateAvailable = update.hasUpdateAvailable,
-            updateMetadataSource = update.metadataSource,
             maintenanceSummary = maintenance.summary,
         )
     }.stateIn(
@@ -262,43 +239,6 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun checkForUpdates() {
-        if (updateState.value.isChecking) return
-        viewModelScope.launch {
-            updateState.value = updateState.value.copy(
-                isChecking = true,
-                summary = "正在检查 GitHub 更新…",
-            )
-            when (val result = appUpdateService.checkForUpdates(BuildConfig.VERSION_NAME, AppUpdateSource.DEFAULT)) {
-                is AppUpdateCheckResult.Success -> {
-                    updateState.value = updateState.value.copy(
-                        isChecking = false,
-                        summary = if (result.hasUpdate) {
-                            "发现新版本 ${result.release.rawTagName}"
-                        } else {
-                            "当前已经是最新版本"
-                        },
-                        release = result.release,
-                        downloadResolution = result.downloadResolution,
-                        hasUpdateAvailable = result.hasUpdate,
-                        metadataSource = result.metadataSource,
-                    )
-                }
-
-                is AppUpdateCheckResult.Failure -> {
-                    updateState.value = updateState.value.copy(
-                        isChecking = false,
-                        summary = result.errorSummary,
-                        release = result.release,
-                        downloadResolution = null,
-                        hasUpdateAvailable = false,
-                        metadataSource = result.metadataSource,
-                    )
-                }
-            }
-        }
-    }
-
     private suspend fun fetchAvatarUrl(steamId64: Long): String? {
         if (steamId64 <= 0L) return null
         return withContext(Dispatchers.IO) {
@@ -320,15 +260,6 @@ class SettingsViewModel @Inject constructor(
         val AVATAR_REGEX = Regex("<avatarFull><!\\[CDATA\\[(.*?)]]></avatarFull>")
     }
 }
-
-private data class UpdateCheckUiState(
-    val isChecking: Boolean = false,
-    val summary: String? = null,
-    val release: AppUpdateReleaseInfo? = null,
-    val downloadResolution: AppUpdateDownloadResolution? = null,
-    val hasUpdateAvailable: Boolean = false,
-    val metadataSource: AppUpdateSource? = null,
-)
 
 private data class MaintenanceUiState(
     val summary: String? = null,

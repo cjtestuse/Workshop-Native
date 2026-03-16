@@ -210,6 +210,9 @@ class DownloadsRepositoryImpl @Inject constructor(
         if (existing.pauseRequested) {
             return@withContext Result.failure(IllegalStateException("正在暂停，请稍候"))
         }
+        val latestItem = runCatching {
+            steamRepository.resolveWorkshopItem(existing.publishedFileId).getOrThrow()
+        }.getOrNull()
 
         downloadTaskDao.upsert(
             existing.copy(
@@ -232,18 +235,14 @@ class DownloadsRepositoryImpl @Inject constructor(
             ExistingWorkPolicy.REPLACE,
             buildWorkRequest(
                 taskId = existing.taskId,
-                url = existing.sourceUrl.takeUnless { it.startsWith("steam://") },
+                url = latestItem?.fileUrl ?: existing.sourceUrl.takeUnless { it.startsWith("steam://") },
                 fileName = existing.fileName,
                 title = existing.title,
                 targetTreeUri = existing.targetTreeUri,
                 downloadFolderName = existing.downloadFolderName,
-                appId = existing.appId,
+                appId = latestItem?.appId?.takeIf { it > 0 } ?: existing.appId,
                 publishedFileId = existing.publishedFileId,
-                contentManifestId = if (existing.sourceUrl.startsWith("steam://")) {
-                    steamRepository.resolveWorkshopItem(existing.publishedFileId).getOrThrow().contentManifestId
-                } else {
-                    0L
-                },
+                contentManifestId = latestItem?.contentManifestId ?: 0L,
                 downloadAuthMode = existing.downloadAuthMode,
                 boundAccountName = existing.boundAccountName,
                 boundSteamId64 = existing.boundSteamId64,
@@ -430,11 +429,6 @@ class DownloadsRepositoryImpl @Inject constructor(
             latestItem.fileName ?: existing.fileName.ifBlank { latestItem.title },
             "workshop-${latestItem.publishedFileId}",
         )
-        val contentManifestId = if ((latestItem.fileUrl ?: "").isBlank()) {
-            latestItem.contentManifestId
-        } else {
-            0L
-        }
         val binding = currentAuthenticatedBinding() ?: DownloadBinding(
             authMode = existing.downloadAuthMode,
             boundAccountName = existing.boundAccountName,
@@ -479,7 +473,7 @@ class DownloadsRepositoryImpl @Inject constructor(
                 downloadFolderName = existing.downloadFolderName,
                 appId = latestItem.appId,
                 publishedFileId = latestItem.publishedFileId,
-                contentManifestId = contentManifestId,
+                contentManifestId = latestItem.contentManifestId,
                 downloadAuthMode = binding.authMode,
                 boundAccountName = binding.boundAccountName,
                 boundSteamId64 = binding.boundSteamId64,

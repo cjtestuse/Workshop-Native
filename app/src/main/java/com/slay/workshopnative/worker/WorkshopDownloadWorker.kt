@@ -135,33 +135,21 @@ class WorkshopDownloadWorker @AssistedInject constructor(
         setForeground(createForegroundInfo(title, 0))
 
         return@withContext runCatching {
-            val completed = when {
-                url.isNotBlank() -> runDirectDownload(
-                    taskId = taskId,
-                    url = url,
-                    fileName = fileName,
-                    title = title,
-                    targetTreeUri = targetTreeUri,
-                    downloadFolderName = downloadFolderName,
-                    existing = existing,
-                )
-                contentManifestId > 0L && appId > 0 -> runSteamWorkshopDownload(
-                    taskId = taskId,
-                    appId = appId,
-                    publishedFileId = publishedFileId,
-                    contentManifestId = contentManifestId,
-                    rootName = fileName,
-                    title = title,
-                    targetTreeUri = targetTreeUri,
-                    downloadFolderName = downloadFolderName,
-                    fallbackTotalBytes = existing.totalBytes,
-                    existing = existing,
-                    downloadAuthMode = downloadAuthMode,
-                    boundAccountName = boundAccountName,
-                    boundSteamId64 = boundSteamId64,
-                )
-                else -> error("该条目没有可用的下载源")
-            }
+            val completed = runBestAvailableDownload(
+                taskId = taskId,
+                url = url,
+                fileName = fileName,
+                title = title,
+                targetTreeUri = targetTreeUri,
+                downloadFolderName = downloadFolderName,
+                appId = appId,
+                publishedFileId = publishedFileId,
+                contentManifestId = contentManifestId,
+                downloadAuthMode = downloadAuthMode,
+                boundAccountName = boundAccountName,
+                boundSteamId64 = boundSteamId64,
+                existing = existing,
+            )
 
             Log.i(
                 LOG_TAG,
@@ -221,6 +209,88 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                 }
             },
         )
+    }
+
+    private suspend fun runBestAvailableDownload(
+        taskId: String,
+        url: String,
+        fileName: String,
+        title: String,
+        targetTreeUri: String?,
+        downloadFolderName: String?,
+        appId: Int,
+        publishedFileId: Long,
+        contentManifestId: Long,
+        downloadAuthMode: DownloadAuthMode,
+        boundAccountName: String?,
+        boundSteamId64: Long?,
+        existing: DownloadTaskEntity,
+    ): CompletedDownload {
+        if (contentManifestId > 0L && appId > 0) {
+            val steamResult = runCatching {
+                runSteamWorkshopDownload(
+                    taskId = taskId,
+                    appId = appId,
+                    publishedFileId = publishedFileId,
+                    contentManifestId = contentManifestId,
+                    rootName = fileName,
+                    title = title,
+                    targetTreeUri = targetTreeUri,
+                    downloadFolderName = downloadFolderName,
+                    fallbackTotalBytes = existing.totalBytes,
+                    existing = existing,
+                    downloadAuthMode = downloadAuthMode,
+                    boundAccountName = boundAccountName,
+                    boundSteamId64 = boundSteamId64,
+                )
+            }
+            if (steamResult.isSuccess) {
+                return steamResult.getOrThrow()
+            }
+
+            val steamFailure = steamResult.exceptionOrNull()
+            if (steamFailure.isPauseSignal() || url.isBlank()) {
+                throw (steamFailure ?: IllegalStateException("Steam 内容下载失败"))
+            }
+
+            Log.w(
+                LOG_TAG,
+                "Steam content download failed, fallback to direct url taskId=$taskId publishedFileId=$publishedFileId",
+                steamFailure,
+            )
+            val latest = downloadTaskDao.getById(taskId) ?: existing
+            if (latest.storageRootRef != null) {
+                downloadTaskDao.upsert(
+                    latest.copy(
+                        storageRootRef = null,
+                        updatedAt = System.currentTimeMillis(),
+                    ),
+                )
+            }
+            return runDirectDownload(
+                taskId = taskId,
+                url = url,
+                fileName = fileName,
+                title = title,
+                targetTreeUri = targetTreeUri,
+                downloadFolderName = downloadFolderName,
+                existing = existing,
+            )
+        }
+
+        if (url.isNotBlank()) {
+            return runDirectDownload(
+                taskId = taskId,
+                url = url,
+                fileName = fileName,
+                title = title,
+                targetTreeUri = targetTreeUri,
+                downloadFolderName = downloadFolderName,
+                existing = existing,
+            )
+        }
+
+        error("该条目没有可用的下载源")
     }
 
     private suspend fun runDirectDownload(

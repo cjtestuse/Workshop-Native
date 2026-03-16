@@ -1,5 +1,7 @@
 package com.slay.workshopnative.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.BorderStroke
@@ -12,24 +14,31 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.DownloadForOffline
 import androidx.compose.material.icons.rounded.Games
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.TravelExplore
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -42,6 +51,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -61,6 +72,7 @@ import com.slay.workshopnative.ui.feature.library.LibraryScreen
 import com.slay.workshopnative.ui.feature.login.LoginScreen
 import com.slay.workshopnative.ui.feature.settings.SettingsScreen
 import com.slay.workshopnative.ui.feature.workshop.WorkshopScreen
+import kotlinx.coroutines.flow.collectLatest
 
 private data class RootDestination(
     val route: String,
@@ -105,16 +117,26 @@ private fun rootDestinations(): List<RootDestination> {
 fun WorkshopNativeRoot(
     viewModel: MainViewModel = hiltViewModel(),
 ) {
+    val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val sessionState by viewModel.sessionState.collectAsStateWithLifecycle()
     val isBootstrapping by viewModel.isBootstrapping.collectAsStateWithLifecycle()
     val guestMode by viewModel.guestMode.collectAsStateWithLifecycle()
     val savedAccounts by viewModel.savedAccounts.collectAsStateWithLifecycle()
+    val appUpdateState by viewModel.appUpdateState.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
     var appUnlocked by remember { mutableStateOf(false) }
     var forceLoginScreen by remember { mutableStateOf(false) }
     var currentRootTabRoute by rememberSaveable { mutableStateOf(RootTab.Explore.route) }
     var activeWorkshopAppId by rememberSaveable { mutableStateOf<Int?>(null) }
     var activeWorkshopAppName by rememberSaveable { mutableStateOf("") }
+    val openExternalUrl: (String) -> Unit = { url ->
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
+    }
 
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
@@ -125,6 +147,12 @@ fun WorkshopNativeRoot(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    LaunchedEffect(viewModel, snackbarHostState) {
+        viewModel.userMessages.collectLatest { message ->
+            snackbarHostState.showSnackbar(message)
         }
     }
 
@@ -195,6 +223,14 @@ fun WorkshopNativeRoot(
                 },
             )
         }
+        AppUpdateDialogIfNeeded(
+            appUpdateState = appUpdateState,
+            onDismiss = viewModel::dismissUpdateDialog,
+            onConfirmDownload = { downloadUrl ->
+                viewModel.dismissUpdateDialog()
+                openExternalUrl(downloadUrl)
+            },
+        )
         return
     }
 
@@ -218,6 +254,9 @@ fun WorkshopNativeRoot(
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             containerColor = MaterialTheme.colorScheme.background.copy(alpha = 0.0f),
+            snackbarHost = {
+                SnackbarHost(hostState = snackbarHostState)
+            },
             bottomBar = {
                 if (!showBottomBar) return@Scaffold
                 RootBottomBar(
@@ -293,6 +332,8 @@ fun WorkshopNativeRoot(
                             SettingsScreen(
                                 paddingValues = shellPadding,
                                 isGuestMode = guestMode,
+                                appUpdateUiState = appUpdateState,
+                                onCheckAppUpdates = viewModel::checkForAppUpdates,
                                 onShowLogin = {
                                     viewModel.leaveGuestMode()
                                     appUnlocked = false
@@ -322,6 +363,115 @@ fun WorkshopNativeRoot(
                 }
             }
         }
+        AppUpdateDialogIfNeeded(
+            appUpdateState = appUpdateState,
+            onDismiss = viewModel::dismissUpdateDialog,
+            onConfirmDownload = { downloadUrl ->
+                viewModel.dismissUpdateDialog()
+                openExternalUrl(downloadUrl)
+            },
+        )
+    }
+}
+
+@Composable
+private fun AppUpdateDialogIfNeeded(
+    appUpdateState: AppUpdateUiState,
+    onDismiss: () -> Unit,
+    onConfirmDownload: (String) -> Unit,
+) {
+    val release = appUpdateState.release
+    val resolution = appUpdateState.downloadResolution
+    if (!appUpdateState.showUpdateDialog || !appUpdateState.hasUpdateAvailable || release == null || resolution == null) {
+        return
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            Button(
+                onClick = { onConfirmDownload(resolution.resolvedUrl) },
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Text("前往下载")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("稍后更新")
+            }
+        },
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "发现新版本 ${release.rawTagName}",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "当前版本 ${appUpdateState.currentVersionName}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    UpdateMetaPill(text = "GitHub 官方")
+                    if (release.publishedAtDisplayText.isNotBlank()) {
+                        UpdateMetaPill(text = release.publishedAtDisplayText)
+                    }
+                }
+                if (release.notesText.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        ),
+                    ) {
+                        Text(
+                            text = release.notesText,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 220.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(14.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                Text(
+                    text = "将通过浏览器直接下载 ${resolution.assetName}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        shape = RoundedCornerShape(28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+    )
+}
+
+@Composable
+private fun UpdateMetaPill(text: String) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+    ) {
+        Text(
+            text = text,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
 
