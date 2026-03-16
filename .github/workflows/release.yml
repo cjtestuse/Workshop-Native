@@ -17,6 +17,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch tag refs
+        run: git fetch --force origin "refs/tags/*:refs/tags/*"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -40,18 +44,20 @@ jobs:
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
-      - name: Extract release notes from tag annotation
+      - name: Extract release notes
         run: |
-          TAG_OBJECT_TYPE="$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(objecttype)')"
-          if [ "$TAG_OBJECT_TYPE" != "tag" ]; then
-            echo "Release tags must be annotated. Use git tag -a v1.0.1 -m '...'" >&2
-            exit 1
+          TAG_REF="refs/tags/$GITHUB_REF_NAME"
+          TAG_OBJECT_TYPE="$(git for-each-ref "$TAG_REF" --format='%(objecttype)')"
+
+          if [ "$TAG_OBJECT_TYPE" = "tag" ]; then
+            TAG_MESSAGE="$(git for-each-ref "$TAG_REF" --format='%(contents)')"
+          else
+            echo "Annotated tag metadata is unavailable for $GITHUB_REF_NAME; using the tagged commit message as release notes."
+            TAG_MESSAGE="$(git log -1 --format=%B "$GITHUB_SHA")"
           fi
 
-          TAG_MESSAGE="$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)')"
-          if [ -z "$TAG_MESSAGE" ]; then
-            echo "Annotated tag message is empty. Use git tag -a v1.0.1 -m '...'" >&2
-            exit 1
+          if ! printf '%s' "$TAG_MESSAGE" | grep -q '[^[:space:]]'; then
+            TAG_MESSAGE="$GITHUB_REF_NAME"
           fi
 
           printf '%s\n' "$TAG_MESSAGE" > release-notes.md
