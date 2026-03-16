@@ -5,7 +5,6 @@ import com.slay.workshopnative.core.storage.DEFAULT_DOWNLOAD_FOLDER_NAME
 import com.slay.workshopnative.data.model.FavoriteWorkshopGame
 import com.slay.workshopnative.data.model.WorkshopGameEntry
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
-import com.slay.workshopnative.update.AppUpdateSource
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -93,7 +92,6 @@ data class UserPreferences(
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
     val workshopAutoResolveVisibleItems: Boolean = true,
     val favoriteWorkshopGames: List<FavoriteWorkshopGame> = emptyList(),
-    val preferredUpdateSource: AppUpdateSource = AppUpdateSource.DEFAULT,
 )
 
 data class OwnedGamesSnapshot(
@@ -130,7 +128,6 @@ class UserPreferencesStore @Inject constructor(
         val WORKSHOP_PAGE_SIZE = intPreferencesKey("workshop_page_size")
         val WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS = booleanPreferencesKey("workshop_auto_resolve_visible_items")
         val FAVORITE_WORKSHOP_GAMES_JSON = stringPreferencesKey("favorite_workshop_games_json")
-        val PREFERRED_UPDATE_SOURCE = stringPreferencesKey("preferred_update_source")
         val OWNED_GAMES_SNAPSHOT_STEAM_ID64 = longPreferencesKey("owned_games_snapshot_steam_id64")
         val OWNED_GAMES_SNAPSHOT_SAVED_AT_MS = longPreferencesKey("owned_games_snapshot_saved_at_ms")
         val OWNED_GAMES_SNAPSHOT_JSON = stringPreferencesKey("owned_games_snapshot_json")
@@ -192,7 +189,6 @@ class UserPreferencesStore @Inject constructor(
                 ),
                 workshopAutoResolveVisibleItems = prefs[WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS] ?: true,
                 favoriteWorkshopGames = decodeFavoriteWorkshopGames(prefs[FAVORITE_WORKSHOP_GAMES_JSON]),
-                preferredUpdateSource = AppUpdateSource.normalizePreferredSource(prefs[PREFERRED_UPDATE_SOURCE]),
             )
         }
         .flowOn(Dispatchers.IO)
@@ -460,12 +456,6 @@ class UserPreferencesStore @Inject constructor(
     suspend fun saveWorkshopAutoResolveVisibleItems(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS] = enabled
-        }
-    }
-
-    suspend fun savePreferredUpdateSource(source: AppUpdateSource) {
-        dataStore.edit { prefs ->
-            prefs[PREFERRED_UPDATE_SOURCE] = source.id
         }
     }
 

@@ -51,7 +51,6 @@ data class SettingsUiState(
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
     val workshopAutoResolveVisibleItems: Boolean = true,
     val currentVersionName: String = BuildConfig.VERSION_NAME,
-    val preferredUpdateSource: AppUpdateSource = AppUpdateSource.DEFAULT,
     val isCheckingUpdates: Boolean = false,
     val updateSummary: String? = null,
     val updateRelease: AppUpdateReleaseInfo? = null,
@@ -104,7 +103,6 @@ class SettingsViewModel @Inject constructor(
             workshopPageSize = prefs.workshopPageSize,
             workshopAutoResolveVisibleItems = prefs.workshopAutoResolveVisibleItems,
             currentVersionName = BuildConfig.VERSION_NAME,
-            preferredUpdateSource = prefs.preferredUpdateSource,
             isCheckingUpdates = update.isChecking,
             updateSummary = update.summary,
             updateRelease = update.release,
@@ -209,12 +207,6 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun savePreferredUpdateSource(source: AppUpdateSource) {
-        viewModelScope.launch {
-            preferencesStore.savePreferredUpdateSource(source)
-        }
-    }
-
     fun clearOwnedGamesCache() {
         viewModelScope.launch {
             steamRepository.clearOwnedGamesCache()
@@ -273,12 +265,11 @@ class SettingsViewModel @Inject constructor(
     fun checkForUpdates() {
         if (updateState.value.isChecking) return
         viewModelScope.launch {
-            val preferredSource = preferencesStore.snapshot().preferredUpdateSource
             updateState.value = updateState.value.copy(
                 isChecking = true,
-                summary = "正在检查更新…",
+                summary = "正在检查 GitHub 更新…",
             )
-            when (val result = appUpdateService.checkForUpdates(BuildConfig.VERSION_NAME, preferredSource)) {
+            when (val result = appUpdateService.checkForUpdates(BuildConfig.VERSION_NAME, AppUpdateSource.DEFAULT)) {
                 is AppUpdateCheckResult.Success -> {
                     updateState.value = updateState.value.copy(
                         isChecking = false,

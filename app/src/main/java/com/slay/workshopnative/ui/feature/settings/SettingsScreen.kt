@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,12 +26,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowForwardIos
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.PrivacyTip
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.SystemUpdateAlt
+import androidx.compose.material.icons.rounded.TravelExplore
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -57,6 +60,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -70,13 +74,11 @@ import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
 import com.slay.workshopnative.data.preferences.DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS
-import com.slay.workshopnative.update.AppUpdateSource
 
 private enum class SettingsDestination {
     DownloadLocation,
     DownloadStrategy,
     Workshop,
-    Access,
     Update,
     DataPrivacy,
 }
@@ -132,55 +134,95 @@ fun SettingsScreen(
         }
 
         item {
-            SettingsOverviewCard {
-                SettingsOverviewRow(
-                    title = "下载位置",
-                    summary = buildString {
-                        append(uiState.downloadTreeLabel ?: "手机下载")
-                        append(" / ")
-                        append(uiState.effectiveDownloadFolderName)
-                    },
-                    onClick = { activeDestination = SettingsDestination.DownloadLocation },
-                )
-                SettingsOverviewRow(
-                    title = "下载策略",
-                    summary = buildString {
-                        append("${uiState.downloadChunkConcurrency} 线程")
-                        append(" · ")
-                        append(if (uiState.preferAnonymousDownloads) "自动优选" else "账号优先")
-                        append(" · ")
-                        append(uiState.cdnTransportPreference.transportLabel())
-                    },
-                    onClick = { activeDestination = SettingsDestination.DownloadStrategy },
-                )
-                SettingsOverviewRow(
-                    title = "创意工坊",
-                    summary = buildString {
-                        append("${uiState.workshopPageSize} / 页")
-                        append(" · ")
-                        append(if (uiState.workshopAutoResolveVisibleItems) "自动检测已开" else "自动检测已关")
-                    },
-                    onClick = { activeDestination = SettingsDestination.Workshop },
-                )
-                SettingsOverviewRow(
-                    title = "匿名访问",
-                    summary = if (uiState.defaultGuestMode) {
-                        "启动时默认进入探索页"
-                    } else {
-                        "启动时优先恢复 Steam 登录"
-                    },
-                    onClick = { activeDestination = SettingsDestination.Access },
-                )
-                SettingsOverviewRow(
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsSectionHeader(
                     title = "应用更新",
-                    summary = uiState.updateSummary ?: "当前版本 ${uiState.currentVersionName}",
-                    onClick = { activeDestination = SettingsDestination.Update },
+                    subtitle = "只通过 GitHub 官方 Release 检查版本与下载。",
                 )
-                SettingsOverviewRow(
-                    title = "数据与隐私",
-                    summary = uiState.maintenanceSummary ?: "查看本地保存内容，清理缓存、登录状态和下载诊断。",
-                    onClick = { activeDestination = SettingsDestination.DataPrivacy },
+                UpdateOverviewCard(
+                    uiState = uiState,
+                    onCheckUpdates = viewModel::checkForUpdates,
+                    onOpenDetails = { activeDestination = SettingsDestination.Update },
+                    onOpenDownload = openExternalUrl,
                 )
+            }
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsSectionHeader(
+                    title = "下载与浏览",
+                    subtitle = "高频设置保留在首页，复杂选项再进入详情页。",
+                )
+                SettingsPanel {
+                    SettingsNavigationRow(
+                        icon = Icons.Rounded.FolderOpen,
+                        iconTint = Color(0xFFB86A2A),
+                        title = "下载位置",
+                        summary = buildString {
+                            append(uiState.downloadTreeLabel ?: "手机下载")
+                            append(" / ")
+                            append(uiState.effectiveDownloadFolderName)
+                        },
+                        onClick = { activeDestination = SettingsDestination.DownloadLocation },
+                    )
+                    SettingsNavigationRow(
+                        icon = Icons.Rounded.Tune,
+                        iconTint = Color(0xFF2F7F73),
+                        title = "下载策略",
+                        summary = buildString {
+                            append("${uiState.downloadChunkConcurrency} 线程")
+                            append(" · ")
+                            append(if (uiState.preferAnonymousDownloads) "自动优选" else "账号优先")
+                            append(" · ")
+                            append(uiState.cdnTransportPreference.transportLabel())
+                        },
+                        onClick = { activeDestination = SettingsDestination.DownloadStrategy },
+                    )
+                    SettingsNavigationRow(
+                        icon = Icons.Rounded.TravelExplore,
+                        iconTint = Color(0xFF3568A8),
+                        title = "创意工坊",
+                        summary = buildString {
+                            append("${uiState.workshopPageSize} / 页")
+                            append(" · ")
+                            append(if (uiState.workshopAutoResolveVisibleItems) "自动检测已开" else "自动检测已关")
+                        },
+                        onClick = { activeDestination = SettingsDestination.Workshop },
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+                    SettingsBooleanRow(
+                        title = "默认启动到访客模式",
+                        description = if (uiState.defaultGuestMode) {
+                            "当前会先进入探索页，不主动恢复 Steam 登录。"
+                        } else {
+                            "当前会优先恢复上次登录状态，再进入内容页。"
+                        },
+                        checked = uiState.defaultGuestMode,
+                        onCheckedChange = viewModel::saveDefaultGuestMode,
+                    )
+                }
+            }
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsSectionHeader(
+                    title = "数据与维护",
+                    subtitle = "查看本地保存内容，处理缓存、历史和登录数据。",
+                )
+                SettingsPanel {
+                    SettingsNavigationRow(
+                        icon = Icons.Rounded.PrivacyTip,
+                        iconTint = Color(0xFF8F4A4A),
+                        title = "数据与隐私",
+                        summary = uiState.maintenanceSummary
+                            ?: "查看本地保存内容，清理缓存、登录状态和下载诊断。",
+                        onClick = { activeDestination = SettingsDestination.DataPrivacy },
+                    )
+                }
             }
         }
     }
@@ -192,7 +234,6 @@ fun SettingsScreen(
                     SettingsDestination.DownloadLocation -> "下载位置"
                     SettingsDestination.DownloadStrategy -> "下载策略"
                     SettingsDestination.Workshop -> "创意工坊"
-                    SettingsDestination.Access -> "匿名访问"
                     SettingsDestination.Update -> "应用更新"
                     SettingsDestination.DataPrivacy -> "数据与隐私"
                 },
@@ -200,7 +241,6 @@ fun SettingsScreen(
                     SettingsDestination.DownloadLocation -> "控制结果最终整理到哪里。"
                     SettingsDestination.DownloadStrategy -> "控制并发、自动优选和 CDN 连接策略。"
                     SettingsDestination.Workshop -> "控制每页数量与下载方式检测。"
-                    SettingsDestination.Access -> "控制启动时是否默认进入访客模式。"
                     SettingsDestination.Update -> "检查 GitHub Release 上的新版本，并打开下载链接。"
                     SettingsDestination.DataPrivacy -> "查看本地保存内容，并清理缓存、历史和诊断信息。"
                 },
@@ -230,14 +270,8 @@ fun SettingsScreen(
                         onToggleAutoResolve = viewModel::saveWorkshopAutoResolveVisibleItems,
                     )
 
-                    SettingsDestination.Access -> GuestSettingsContent(
-                        defaultGuestMode = uiState.defaultGuestMode,
-                        onToggleDefaultGuestMode = viewModel::saveDefaultGuestMode,
-                    )
-
                     SettingsDestination.Update -> UpdateSettingsContent(
                         uiState = uiState,
-                        onSelectSource = viewModel::savePreferredUpdateSource,
                         onCheckUpdates = viewModel::checkForUpdates,
                         onOpenDownload = openExternalUrl,
                     )
@@ -567,14 +601,9 @@ private fun SettingsSubsectionTitle(
 }
 
 @Composable
-private fun SettingsOverviewCard(
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    SettingsPanel(content = content)
-}
-
-@Composable
-private fun SettingsOverviewRow(
+private fun SettingsNavigationRow(
+    icon: ImageVector,
+    iconTint: Color,
     title: String,
     summary: String,
     onClick: () -> Unit,
@@ -592,6 +621,22 @@ private fun SettingsOverviewRow(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = iconTint.copy(alpha = 0.12f),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = iconTint,
+                    )
+                }
+            }
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -609,7 +654,12 @@ private fun SettingsOverviewRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            SettingsValuePill(text = "调整")
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.ArrowForwardIos,
+                contentDescription = "进入详情",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                modifier = Modifier.size(18.dp),
+            )
         }
     }
 }
@@ -642,11 +692,9 @@ private fun SettingsSheetScaffold(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun UpdateSettingsContent(
     uiState: SettingsUiState,
-    onSelectSource: (AppUpdateSource) -> Unit,
     onCheckUpdates: () -> Unit,
     onOpenDownload: (String) -> Unit,
 ) {
@@ -656,25 +704,12 @@ private fun UpdateSettingsContent(
     )
 
     SettingsSubsectionTitle(
-        title = "更新源",
-        subtitle = "优先使用你选择的源；如果不可用，会自动回退到其他可访问源。",
+        title = "更新来源",
+        subtitle = "仅使用 GitHub 官方 Release 元数据与官方 APK 下载地址。",
     )
 
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        AppUpdateSource.userSelectableSources().forEach { source ->
-            SettingsChoiceChip(
-                label = source.displayName,
-                selected = uiState.preferredUpdateSource == source,
-                onClick = { onSelectSource(source) },
-            )
-        }
-    }
-
     SettingsInlineHint(
-        text = "如果选择 ghproxy.vip、gh.llkk.cc 或 gh-proxy.com，更新请求和 APK 下载会经过第三方代理节点。",
+        text = "不会再通过第三方代理检查更新或下载 APK，减少中间人篡改和请求泄漏风险。",
     )
 
     Button(
@@ -989,19 +1024,6 @@ private fun WorkshopSettingsContent(
 }
 
 @Composable
-private fun GuestSettingsContent(
-    defaultGuestMode: Boolean,
-    onToggleDefaultGuestMode: (Boolean) -> Unit,
-) {
-    SettingsBooleanRow(
-        title = "默认启动到访客模式",
-        description = "开启后，应用启动时优先进入探索页，不主动恢复 Steam 登录。",
-        checked = defaultGuestMode,
-        onCheckedChange = onToggleDefaultGuestMode,
-    )
-}
-
-@Composable
 private fun SettingsBooleanRow(
     title: String,
     description: String,
@@ -1036,6 +1058,158 @@ private fun SettingsBooleanRow(
             checked = checked,
             onCheckedChange = onCheckedChange,
         )
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun UpdateOverviewCard(
+    uiState: SettingsUiState,
+    onCheckUpdates: () -> Unit,
+    onOpenDetails: () -> Unit,
+    onOpenDownload: (String) -> Unit,
+) {
+    val statusLabel = when {
+        uiState.isCheckingUpdates -> "检查中"
+        uiState.hasUpdateAvailable -> "可更新"
+        uiState.updateRelease != null -> "已检查"
+        else -> "官方源"
+    }
+    val statusContainerColor = when {
+        uiState.hasUpdateAvailable -> Color(0xFFDCEFD8)
+        uiState.isCheckingUpdates -> Color(0xFFE8EDF7)
+        else -> MaterialTheme.colorScheme.surfaceContainerHigh
+    }
+    val statusContentColor = when {
+        uiState.hasUpdateAvailable -> Color(0xFF215B28)
+        uiState.isCheckingUpdates -> Color(0xFF355A8A)
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+
+    Surface(
+        shape = RoundedCornerShape(26.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+        shadowElevation = 6.dp,
+        tonalElevation = 3.dp,
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                ) {
+                    Box(
+                        modifier = Modifier.size(46.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.SystemUpdateAlt,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Text(
+                        text = "当前版本",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = uiState.currentVersionName,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+                SettingsValuePill(
+                    text = statusLabel,
+                    containerColor = statusContainerColor,
+                    contentColor = statusContentColor,
+                    borderColor = statusContentColor.copy(alpha = 0.15f),
+                )
+            }
+
+            Text(
+                text = uiState.updateSummary ?: "检查最新 Release、查看版本说明，并跳转 GitHub 官方下载地址。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            uiState.updateRelease?.let { release ->
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    SettingsValuePill(text = "最新 ${release.rawTagName}")
+                    if (release.publishedAtDisplayText.isNotBlank()) {
+                        SettingsValuePill(text = release.publishedAtDisplayText)
+                    }
+                }
+            }
+
+            when {
+                uiState.hasUpdateAvailable && uiState.updateDownloadResolution != null -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { onOpenDownload(uiState.updateDownloadResolution.resolvedUrl) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(20.dp),
+                        ) {
+                            Text("前往下载")
+                        }
+                        OutlinedButton(
+                            onClick = onOpenDetails,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(20.dp),
+                        ) {
+                            Text("版本详情")
+                        }
+                    }
+                }
+
+                else -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = onCheckUpdates,
+                            enabled = !uiState.isCheckingUpdates,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(20.dp),
+                        ) {
+                            if (uiState.isCheckingUpdates) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.2.dp,
+                                    color = Color.White,
+                                )
+                                Text("正在检查", modifier = Modifier.padding(start = 8.dp))
+                            } else {
+                                Text("检查更新")
+                            }
+                        }
+                        if (uiState.updateRelease != null) {
+                            OutlinedButton(
+                                onClick = onOpenDetails,
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(20.dp),
+                            ) {
+                                Text("查看详情")
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1103,18 +1277,21 @@ private fun SettingsInlineHint(text: String) {
 private fun SettingsValuePill(
     text: String,
     modifier: Modifier = Modifier,
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    contentColor: Color = MaterialTheme.colorScheme.onSurface,
+    borderColor: Color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
 ) {
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+        color = containerColor,
+        border = BorderStroke(1.dp, borderColor),
     ) {
         Text(
             text = text,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurface,
+            color = contentColor,
         )
     }
 }

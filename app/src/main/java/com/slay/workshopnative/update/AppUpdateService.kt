@@ -40,7 +40,7 @@ class AppUpdateService @Inject constructor(
             )
         }
 
-        var lastErrorSummary = "无法连接任何更新源。"
+        var lastErrorSummary = "无法连接 GitHub 官方更新源。"
         var successfulMetadataSource: AppUpdateSource? = null
         var releaseInfo: AppUpdateReleaseInfo? = null
 

@@ -3,56 +3,17 @@ package com.slay.workshopnative.update
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.LinkedHashSet
 import java.util.Locale
 
 enum class AppUpdateSource(
     val id: String,
     val displayName: String,
     private val proxyPrefix: String?,
-    val supportsMetadataCheck: Boolean,
-    val supportsDownloadProxy: Boolean,
-    val userSelectable: Boolean,
 ) {
     Official(
         id = "official",
-        displayName = "GitHub",
+        displayName = "GitHub 官方",
         proxyPrefix = null,
-        supportsMetadataCheck = true,
-        supportsDownloadProxy = true,
-        userSelectable = true,
-    ),
-    GhProxyVip(
-        id = "ghproxy_vip",
-        displayName = "ghproxy.vip",
-        proxyPrefix = "https://ghproxy.vip/",
-        supportsMetadataCheck = true,
-        supportsDownloadProxy = true,
-        userSelectable = true,
-    ),
-    GhLlkk(
-        id = "gh_llkk",
-        displayName = "gh.llkk.cc",
-        proxyPrefix = "https://gh.llkk.cc/",
-        supportsMetadataCheck = true,
-        supportsDownloadProxy = true,
-        userSelectable = true,
-    ),
-    GhProxyCom(
-        id = "gh_proxy_com",
-        displayName = "gh-proxy.com",
-        proxyPrefix = "https://gh-proxy.com/",
-        supportsMetadataCheck = false,
-        supportsDownloadProxy = true,
-        userSelectable = true,
-    ),
-    GhProxyNet(
-        id = "ghproxy_net",
-        displayName = "ghproxy.net",
-        proxyPrefix = "https://ghproxy.net/",
-        supportsMetadataCheck = false,
-        supportsDownloadProxy = true,
-        userSelectable = false,
     ),
     ;
 
@@ -64,42 +25,19 @@ enum class AppUpdateSource(
         fun fromPersistedValue(value: String?): AppUpdateSource? =
             entries.firstOrNull { it.id == value }
 
-        fun normalizePreferredSource(value: String?): AppUpdateSource {
-            val source = fromPersistedValue(value)
-            return if (source != null && source.userSelectable) source else DEFAULT
-        }
+        fun normalizePreferredSource(value: String?): AppUpdateSource =
+            fromPersistedValue(value) ?: DEFAULT
 
         fun userSelectableSources(): List<AppUpdateSource> =
-            entries.filter { it.userSelectable }
+            listOf(Official)
 
-        fun metadataCandidates(preferred: AppUpdateSource): List<AppUpdateSource> {
-            val normalized = normalizePreferredSource(preferred.id)
-            val ordered = LinkedHashSet<AppUpdateSource>()
-            if (normalized.supportsMetadataCheck) {
-                ordered += normalized
-            }
-            userSelectableSources()
-                .filter { it != normalized && it.supportsMetadataCheck }
-                .forEach(ordered::add)
-            ordered += Official
-            return ordered.toList()
-        }
+        fun metadataCandidates(preferred: AppUpdateSource): List<AppUpdateSource> =
+            listOf(Official)
 
         fun downloadCandidates(
             preferred: AppUpdateSource,
             metadataSource: AppUpdateSource,
-        ): List<AppUpdateSource> {
-            val normalized = normalizePreferredSource(preferred.id)
-            val ordered = LinkedHashSet<AppUpdateSource>()
-            if (normalized.supportsDownloadProxy) ordered += normalized
-            if (metadataSource.supportsDownloadProxy) ordered += metadataSource
-            userSelectableSources()
-                .filter { it != normalized && it.supportsDownloadProxy }
-                .forEach(ordered::add)
-            ordered += GhProxyNet
-            ordered += Official
-            return ordered.toList()
-        }
+        ): List<AppUpdateSource> = listOf(Official)
     }
 }
 

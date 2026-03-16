@@ -137,4 +137,4 @@ git push origin v1.0.1
 
 - Steam 浏览、登录和下载请求直接访问 Steam 相关域名，不依赖自建后端。
 - `steamcontent.com` 被允许使用明文流量，是为了兼容部分 Steam 内容分发节点。
-- 更新检查默认使用 GitHub 官方源；如果手动切换到 `ghproxy.vip`、`gh.llkk.cc`、`gh-proxy.com` 等代理源，请求和 APK 下载会经过第三方代理。
+- 更新检查和 APK 下载仅使用 GitHub 官方 Release 与官方下载地址，不再经过第三方代理。
