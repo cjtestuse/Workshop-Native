@@ -42,7 +42,7 @@ jobs:
 
       - name: Extract release notes from tag annotation
         run: |
-          TAG_MESSAGE="$(git cat-file tag "$GITHUB_REF_NAME" | sed '1,/^$/d')"
+          TAG_MESSAGE="$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)')"
           if [ -z "$TAG_MESSAGE" ]; then
             echo "Annotated tag message is empty. Use git tag -a v1.0.1 -m '...'" >&2
             exit 1
