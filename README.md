@@ -93,6 +93,7 @@ ANDROID_SDK_ROOT=<your-android-sdk> \
 - 使用 GitHub Actions 的 `run_number` 作为 `versionCode`
 - 构建并上传 `workshop-native-release.apk`
 - 生成 `SHA256SUMS.txt`
+- 使用 annotated tag 的内容作为 Release 更新说明
 - 创建对应的 GitHub Release
 
 发版前需要在 GitHub 仓库里配置这些 Secrets：
@@ -111,7 +112,11 @@ base64 -i release-keystore.jks | pbcopy
 推荐发布流程：
 
 ```bash
-git tag -a v1.0.1 -m "v1.0.1"
+git tag -a v1.0.1 -m $'v1.0.1
+
+- 优化下载速度
+- 修复登录恢复
+- 完善更新逻辑'
 git push origin v1.0.1
 ```
 

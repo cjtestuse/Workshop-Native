@@ -40,6 +40,16 @@ jobs:
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
+      - name: Extract release notes from tag annotation
+        run: |
+          TAG_MESSAGE="$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)')"
+          if [ -z "$TAG_MESSAGE" ]; then
+            echo "Annotated tag message is empty. Use git tag -a v1.0.1 -m '...'" >&2
+            exit 1
+          fi
+
+          printf '%s\n' "$TAG_MESSAGE" > release-notes.md
+
       - name: Validate signing secrets
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -98,7 +108,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             workshop-native-release.apk
             SHA256SUMS.txt
