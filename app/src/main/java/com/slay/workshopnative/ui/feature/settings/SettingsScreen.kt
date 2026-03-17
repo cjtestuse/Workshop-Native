@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.PrivacyTip
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.SystemUpdateAlt
@@ -74,13 +75,17 @@ import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
 import com.slay.workshopnative.data.preferences.DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS
+import com.slay.workshopnative.ui.AppNoticeItem
 import com.slay.workshopnative.ui.AppUpdateUiState
+import com.slay.workshopnative.ui.WorkshopNativeAbout
 
 private enum class SettingsDestination {
     DownloadLocation,
     DownloadStrategy,
     Workshop,
     DataPrivacy,
+    About,
+    UsageBoundary,
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -98,6 +103,13 @@ fun SettingsScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var activeDestination by remember { mutableStateOf<SettingsDestination?>(null) }
+    val openExternalUrl: (String) -> Unit = { url ->
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }
+    }
 
     val treeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -155,7 +167,7 @@ fun SettingsScreen(
                         iconTint = Color(0xFFB86A2A),
                         title = "下载位置",
                         summary = buildString {
-                            append(uiState.downloadTreeLabel ?: "手机下载")
+                            append(uiState.downloadTreeLabel ?: "系统下载")
                             append(" / ")
                             append(uiState.effectiveDownloadFolderName)
                         },
@@ -168,7 +180,7 @@ fun SettingsScreen(
                         summary = buildString {
                             append("${uiState.downloadChunkConcurrency} 线程")
                             append(" · ")
-                            append(if (uiState.preferAnonymousDownloads) "自动优选" else "账号优先")
+                            append(if (uiState.preferAnonymousDownloads) "匿名优先" else "账号优先")
                             append(" · ")
                             append(uiState.cdnTransportPreference.transportLabel())
                         },
@@ -220,6 +232,31 @@ fun SettingsScreen(
                 }
             }
         }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsSectionHeader(
+                    title = "关于与说明",
+                    subtitle = "查看项目来源、作者信息，以及首次启动时展示的说明。",
+                )
+                SettingsPanel {
+                    SettingsNavigationRow(
+                        icon = Icons.Rounded.Info,
+                        iconTint = Color(0xFF8A633B),
+                        title = "关于 Workshop Native",
+                        summary = "开源地址、作者信息、版本信息与使用说明。",
+                        onClick = { activeDestination = SettingsDestination.About },
+                    )
+                    SettingsNavigationRow(
+                        icon = Icons.Rounded.PrivacyTip,
+                        iconTint = Color(0xFF8F4A4A),
+                        title = "学习交流与使用边界",
+                        summary = "查看合法使用范围、禁止用途和权利反馈说明。",
+                        onClick = { activeDestination = SettingsDestination.UsageBoundary },
+                    )
+                }
+            }
+        }
     }
 
     activeDestination?.let { destination ->
@@ -230,12 +267,16 @@ fun SettingsScreen(
                     SettingsDestination.DownloadStrategy -> "下载策略"
                     SettingsDestination.Workshop -> "创意工坊"
                     SettingsDestination.DataPrivacy -> "数据与隐私"
+                    SettingsDestination.About -> "关于 Workshop Native"
+                    SettingsDestination.UsageBoundary -> "学习交流与使用边界"
                 },
                 subtitle = when (destination) {
                     SettingsDestination.DownloadLocation -> "控制结果最终整理到哪里。"
-                    SettingsDestination.DownloadStrategy -> "控制并发、自动优选和 CDN 连接策略。"
+                    SettingsDestination.DownloadStrategy -> "控制并发、匿名优先和 CDN 连接策略。"
                     SettingsDestination.Workshop -> "控制每页数量与下载方式检测。"
                     SettingsDestination.DataPrivacy -> "查看本地保存内容，并清理缓存、历史和诊断信息。"
+                    SettingsDestination.About -> "查看作者、开源地址和首次启动时展示的说明。"
+                    SettingsDestination.UsageBoundary -> "查看使用范围、权利边界和通过项目主页反馈问题的方式。"
                 },
             ) {
                 when (destination) {
@@ -270,6 +311,15 @@ fun SettingsScreen(
                         onClearFavoriteGames = viewModel::clearFavoriteWorkshopGames,
                         onClearDownloadDiagnostics = viewModel::clearInactiveDownloadDiagnostics,
                         onClearDownloadHistory = viewModel::clearInactiveDownloadHistory,
+                    )
+
+                    SettingsDestination.About -> AboutContent(
+                        versionName = appUpdateUiState.currentVersionName,
+                        onOpenRepository = { openExternalUrl(WorkshopNativeAbout.repositoryUrl) },
+                    )
+
+                    SettingsDestination.UsageBoundary -> UsageBoundaryContent(
+                        onOpenRepository = { openExternalUrl(WorkshopNativeAbout.repositoryUrl) },
                     )
                 }
             }
@@ -811,9 +861,9 @@ private fun DataPrivacyContent(
         title = "本地保存内容",
         subtitle = "以下数据只保存在当前设备，用于登录恢复、下载管理和界面体验。",
     )
-    SettingsInlineHint(text = "登录 refresh token 使用设备本地加密存储，不参与系统备份。")
-    SettingsInlineHint(text = "下载记录会保留结果路径；下载源地址、节点地址等诊断信息可以单独清除。")
-    SettingsInlineHint(text = "为兼容部分 Steam 内容分发节点，应用允许 steamcontent.com 使用明文流量。")
+    SettingsInlineHint(text = "登录状态只保存在当前设备，并通过系统安全能力加密保存。")
+    SettingsInlineHint(text = "下载记录会保留结果路径；如不需要，可单独清除诊断信息和历史记录。")
+    SettingsInlineHint(text = "应用会直接连接 Steam 官方相关下载节点，以兼容不同网络环境。")
 
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
@@ -848,6 +898,82 @@ private fun DataPrivacyContent(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AboutContent(
+    versionName: String,
+    onOpenRepository: () -> Unit,
+) {
+    SettingsSubsectionTitle(
+        title = "项目定位",
+        subtitle = "一个面向 Android 的 Steam 创意工坊下载工具，默认强调开源、匿名优先和本地保存。",
+    )
+
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        WorkshopNativeAbout.highlights.forEach { highlight ->
+            SettingsValuePill(text = highlight)
+        }
+        SettingsValuePill(
+            text = "版本 $versionName",
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            borderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+        )
+    }
+
+    SettingsInlineHint(text = "本应用不依赖自建后端，源码与版本发布都以 GitHub 官方仓库为准。")
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsSubsectionTitle(
+        title = "作者与项目信息",
+        subtitle = "以下信息可以帮助确认项目来源。",
+    )
+    SettingsInfoRow(label = "应用名称", value = WorkshopNativeAbout.appDisplayName)
+    SettingsInfoRow(label = "开源地址", value = WorkshopNativeAbout.repositoryUrl)
+    SettingsInfoRow(label = "B 站昵称", value = WorkshopNativeAbout.bilibiliNickname)
+    SettingsInfoRow(label = "项目关系", value = "个人开源项目，与 Valve / Steam 无官方关联")
+    SettingsActionButton(
+        text = "打开 GitHub 仓库",
+        onClick = onOpenRepository,
+    )
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsSubsectionTitle(
+        title = "使用说明与免责声明",
+        subtitle = "首次启动已提示一次，这里保留完整说明，方便之后随时复看。",
+    )
+    WorkshopNativeAbout.disclaimerItems.forEach { item ->
+        AppNoticeCard(item = item)
+    }
+}
+
+@Composable
+private fun UsageBoundaryContent(
+    onOpenRepository: () -> Unit,
+) {
+    SettingsSubsectionTitle(
+        title = "学习交流与使用边界",
+        subtitle = "这部分说明聚焦合法使用范围、禁止用途、用户责任和权利反馈方式。",
+    )
+
+    WorkshopNativeAbout.usageBoundaryItems.forEach { item ->
+        AppNoticeCard(item = item)
+    }
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsInlineHint(text = "如需反馈问题或权利相关事项，可优先通过项目 GitHub 主页联系作者。")
+    SettingsActionButton(
+        text = "打开项目主页",
+        onClick = onOpenRepository,
+    )
+}
+
 @Composable
 private fun DownloadLocationContent(
     uiState: SettingsUiState,
@@ -856,7 +982,7 @@ private fun DownloadLocationContent(
     onRestoreDefault: () -> Unit,
 ) {
     val targetSummary = buildString {
-        append(uiState.downloadTreeLabel ?: "手机下载")
+        append(uiState.downloadTreeLabel ?: "系统下载")
         append(" / ")
         append(uiState.effectiveDownloadFolderName)
     }
@@ -939,15 +1065,15 @@ private fun DownloadStrategyContent(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
     SettingsBooleanRow(
-        title = "公开条目自动优选下载",
-        description = "匿名会话已预热时优先匿名，否则直接走当前已登录账号。",
+        title = "公开内容优先匿名下载",
+        description = "公开内容会优先使用匿名方式，必要时再使用当前登录账号。",
         checked = uiState.preferAnonymousDownloads,
         onCheckedChange = onTogglePreferAnonymous,
     )
 
     SettingsBooleanRow(
-        title = "匿名失败后自动切已登录下载",
-        description = "仅在当前已登录且任务绑定了当前账号时生效。",
+        title = "匿名失败后回退到账号下载",
+        description = "仅在你已登录且任务绑定当前账号时生效。",
         checked = uiState.allowAuthenticatedDownloadFallback,
         onCheckedChange = onToggleAllowAuthenticatedFallback,
     )
@@ -1117,6 +1243,63 @@ private fun SettingsActionButton(
 }
 
 @Composable
+private fun SettingsInfoRow(
+    label: String,
+    value: String,
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AppNoticeCard(item: AppNoticeItem) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = item.title,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = item.body,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
 private fun SettingsInlineHint(text: String) {
     Text(
         text = text,
@@ -1162,7 +1345,7 @@ private fun initialsOf(accountName: String): String {
 private fun CdnTransportPreference.transportLabel(): String {
     return when (this) {
         CdnTransportPreference.Auto -> "自动"
-        CdnTransportPreference.PreferSystem -> "优先系统"
+        CdnTransportPreference.PreferSystem -> "跟随系统"
         CdnTransportPreference.PreferDirect -> "优先直连"
     }
 }
@@ -1170,7 +1353,7 @@ private fun CdnTransportPreference.transportLabel(): String {
 private fun CdnTransportPreference.transportDescription(): String {
     return when (this) {
         CdnTransportPreference.Auto -> "自动根据上次成功路径和当前网络环境选择。通常适合大多数情况。"
-        CdnTransportPreference.PreferSystem -> "优先沿用系统当前网络路径。若浏览器或 Steam 客户端本来就快，通常先试这个。"
+        CdnTransportPreference.PreferSystem -> "优先沿用当前系统网络路径。适合浏览器或 Steam 客户端本来就稳定的情况。"
         CdnTransportPreference.PreferDirect -> "优先绕开系统代理直连 CDN。适合代理链路本身更慢或更不稳定的情况。"
     }
 }
@@ -1178,7 +1361,7 @@ private fun CdnTransportPreference.transportDescription(): String {
 private fun CdnPoolPreference.poolLabel(): String {
     return when (this) {
         CdnPoolPreference.Auto -> "自动"
-        CdnPoolPreference.TrustedOnly -> "高速范围"
+        CdnPoolPreference.TrustedOnly -> "稳定节点"
         CdnPoolPreference.PreferGoogle2 -> "优先 Google2"
         CdnPoolPreference.PreferFastly -> "优先 Fastly"
         CdnPoolPreference.PreferAkamai -> "优先 Akamai"

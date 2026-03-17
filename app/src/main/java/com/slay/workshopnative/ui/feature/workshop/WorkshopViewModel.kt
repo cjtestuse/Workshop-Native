@@ -493,7 +493,7 @@ class WorkshopViewModel @Inject constructor(
     private fun downloadIdentityLabel(): String {
         return when {
             currentSessionStatus != SessionStatus.Authenticated -> "匿名下载"
-            preferAnonymousDownloads -> currentAccountName.ifBlank { "已登录账号" }.let { "自动优选·$it" }
+            preferAnonymousDownloads -> currentAccountName.ifBlank { "已登录账号" }.let { "匿名优先·$it" }
             else -> currentAccountName.ifBlank { "已登录账号" }.let { "账号下载·$it" }
         }
     }
@@ -503,9 +503,9 @@ class WorkshopViewModel @Inject constructor(
             currentSessionStatus != SessionStatus.Authenticated ->
                 "当前未登录，将直接按匿名方式尝试公开下载。"
             preferAnonymousDownloads && allowAuthenticatedFallback ->
-                "会优先走已预热的匿名路径；若匿名不可用或条目需要账号，再自动切回当前 Steam 账号。"
+                "会优先尝试匿名方式；若匿名不可用或条目需要账号，再切回当前 Steam 账号。"
             preferAnonymousDownloads ->
-                "会优先走已预热的匿名路径；若匿名不可用，不会自动切换到当前 Steam 账号。"
+                "会优先尝试匿名方式；若匿名不可用，不会自动切换到当前 Steam 账号。"
             else ->
                 "当前会直接使用 ${currentAccountName.ifBlank { "已登录账号" }} 进行下载。"
         }

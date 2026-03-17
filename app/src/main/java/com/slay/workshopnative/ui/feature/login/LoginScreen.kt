@@ -266,7 +266,7 @@ fun LoginScreen(
                                 shape = RoundedCornerShape(20.dp),
                             ) {
                                 Text(
-                                    text = "不登录，直接访问",
+                                    text = "匿名访问",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.SemiBold,
                                 )
@@ -324,7 +324,7 @@ fun LoginScreen(
                                                     shape = RoundedCornerShape(16.dp),
                                                     enabled = inputsEnabled,
                                                 ) {
-                                                    Text("直接进入")
+                                                    Text("切换进入")
                                                 }
                                             }
                                         }

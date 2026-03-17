@@ -1635,8 +1635,8 @@ private fun DownloadTaskEntity.downloadAuthCompactLabel(): String {
     return when (downloadAuthMode) {
         DownloadAuthMode.Anonymous -> "匿名下载"
         DownloadAuthMode.Auto -> boundAccountName?.takeIf { it.isNotBlank() }?.let {
-            "自动优选·$it"
-        } ?: "自动优选"
+            "匿名优先·$it"
+        } ?: "匿名优先"
         DownloadAuthMode.Authenticated -> boundAccountName?.takeIf { it.isNotBlank() }?.let {
             "账号下载·$it"
         } ?: "账号下载"
@@ -1648,9 +1648,9 @@ private fun DownloadTaskEntity.downloadAuthSummary(): String {
         DownloadAuthMode.Anonymous -> "匿名下载"
         DownloadAuthMode.Auto -> {
             if (!boundAccountName.isNullOrBlank()) {
-                "自动优选，必要时回退到 $boundAccountName"
+                "匿名优先，必要时回退到 $boundAccountName"
             } else {
-                "自动优选，必要时回退到已登录账号"
+                "匿名优先，必要时回退到已登录账号"
             }
         }
         DownloadAuthMode.Authenticated -> boundAccountName?.let { "账号下载：$it" } ?: "账号下载"
@@ -1743,10 +1743,12 @@ private fun DownloadTaskEntity.isInSystemDownloads(): Boolean {
 }
 
 private fun DownloadTaskEntity.publicDownloadsFolderName(): String? {
-    val prefix = "手机下载/"
+    val prefixes = listOf("系统下载/", "手机下载/")
     return destinationLabel
-        .takeIf { it.startsWith(prefix) }
-        ?.removePrefix(prefix)
+        .takeIf { label -> prefixes.any(label::startsWith) }
+        ?.let { label ->
+            prefixes.firstOrNull(label::startsWith)?.let(label::removePrefix) ?: label
+        }
         ?.substringBefore('/')
         ?.ifBlank { null }
 }

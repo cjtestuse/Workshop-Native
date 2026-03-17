@@ -584,7 +584,7 @@ private fun GameRow(
                         )
                     }
                     ActionCapsule(
-                        text = "工坊下载",
+                        text = "进入工坊",
                         onClick = onOpenWorkshop,
                     )
                 }
@@ -852,7 +852,7 @@ private fun FavoriteWorkshopRow(
                         )
                     }
                     ActionCapsule(
-                        text = "工坊下载",
+                        text = "进入工坊",
                         onClick = onOpenWorkshop,
                     )
                 }

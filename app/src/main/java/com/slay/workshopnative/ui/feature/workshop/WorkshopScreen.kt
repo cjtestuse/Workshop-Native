@@ -1665,7 +1665,7 @@ private fun DownloadTaskEntity.statusShortLabel(): String {
         DownloadStatus.Success -> "已完成"
         DownloadStatus.Failed -> "失败"
         DownloadStatus.Cancelled -> "已取消"
-        DownloadStatus.Unavailable -> "不可下"
+        DownloadStatus.Unavailable -> "不可下载"
     }
 }
 
@@ -1685,7 +1685,7 @@ private fun WorkshopItem.downloadModeLabel(autoResolveEnabled: Boolean): String 
         canSteamContentDownload -> "Steam 内容下载"
         canDirectDownload -> "公开直链下载"
         !isDownloadInfoResolved && autoResolveEnabled -> "检测下载方式中"
-        !isDownloadInfoResolved -> "点详情检测"
+        !isDownloadInfoResolved -> "详情页检测"
         else -> "暂不可下载"
     }
 }

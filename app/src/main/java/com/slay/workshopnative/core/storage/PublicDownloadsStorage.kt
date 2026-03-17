@@ -29,7 +29,7 @@ fun buildDownloadDestinationLabel(
 ): String {
     val safeFolderName = normalizeDownloadFolderName(folderName)
     return if (treeLabel.isNullOrBlank()) {
-        "手机下载/$safeFolderName"
+        "系统下载/$safeFolderName"
     } else {
         "$treeLabel/$safeFolderName"
     }

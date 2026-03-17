@@ -77,6 +77,8 @@ data class UserPreferences(
     val steamId64: Long = 0,
     val rememberSession: Boolean = true,
     val savedAccounts: List<SavedSteamAccount> = emptyList(),
+    val hasAcknowledgedDisclaimer: Boolean = false,
+    val hasAcknowledgedUsageBoundary: Boolean = false,
     val defaultGuestMode: Boolean = true,
     val lastConnectionProfileLabel: String? = null,
     val lastCdnHost: String? = null,
@@ -113,6 +115,8 @@ class UserPreferencesStore @Inject constructor(
         val STEAM_ID64 = longPreferencesKey("steam_id64")
         val REMEMBER_SESSION = booleanPreferencesKey("remember_session")
         val SAVED_ACCOUNTS_JSON = stringPreferencesKey("saved_accounts_json")
+        val HAS_ACKNOWLEDGED_DISCLAIMER = booleanPreferencesKey("has_acknowledged_disclaimer")
+        val HAS_ACKNOWLEDGED_USAGE_BOUNDARY = booleanPreferencesKey("has_acknowledged_usage_boundary")
         val DEFAULT_GUEST_MODE = booleanPreferencesKey("default_guest_mode")
         val LAST_CONNECTION_PROFILE = stringPreferencesKey("last_connection_profile")
         val LAST_CDN_HOST = stringPreferencesKey("last_cdn_host")
@@ -166,6 +170,8 @@ class UserPreferencesStore @Inject constructor(
                 steamId64 = activeSessionProfile.steamId64,
                 rememberSession = prefs[REMEMBER_SESSION] ?: true,
                 savedAccounts = savedAccounts,
+                hasAcknowledgedDisclaimer = prefs[HAS_ACKNOWLEDGED_DISCLAIMER] ?: false,
+                hasAcknowledgedUsageBoundary = prefs[HAS_ACKNOWLEDGED_USAGE_BOUNDARY] ?: false,
                 defaultGuestMode = prefs[DEFAULT_GUEST_MODE] ?: true,
                 lastConnectionProfileLabel = prefs[LAST_CONNECTION_PROFILE],
                 lastCdnHost = prefs[LAST_CDN_HOST],
@@ -406,6 +412,18 @@ class UserPreferencesStore @Inject constructor(
     suspend fun saveDefaultGuestMode(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[DEFAULT_GUEST_MODE] = enabled
+        }
+    }
+
+    suspend fun saveDisclaimerAcknowledged(acknowledged: Boolean = true) {
+        dataStore.edit { prefs ->
+            prefs[HAS_ACKNOWLEDGED_DISCLAIMER] = acknowledged
+        }
+    }
+
+    suspend fun saveUsageBoundaryAcknowledged(acknowledged: Boolean = true) {
+        dataStore.edit { prefs ->
+            prefs[HAS_ACKNOWLEDGED_USAGE_BOUNDARY] = acknowledged
         }
     }
 

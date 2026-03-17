@@ -124,6 +124,8 @@ fun WorkshopNativeRoot(
     val guestMode by viewModel.guestMode.collectAsStateWithLifecycle()
     val savedAccounts by viewModel.savedAccounts.collectAsStateWithLifecycle()
     val appUpdateState by viewModel.appUpdateState.collectAsStateWithLifecycle()
+    val hasAcknowledgedDisclaimer by viewModel.hasAcknowledgedDisclaimer.collectAsStateWithLifecycle()
+    val hasAcknowledgedUsageBoundary by viewModel.hasAcknowledgedUsageBoundary.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var appUnlocked by remember { mutableStateOf(false) }
     var forceLoginScreen by remember { mutableStateOf(false) }
@@ -194,6 +196,13 @@ fun WorkshopNativeRoot(
                 (hasRememberedAccount && sessionState.status == SessionStatus.Connecting) ||
                 (hasRememberedAccount && sessionState.status == SessionStatus.Error)
         )
+    val showDisclaimerDialog = hasAcknowledgedDisclaimer == false &&
+        !showStartupOverlay &&
+        !showRestoreScreen
+    val showUsageBoundaryDialog = hasAcknowledgedDisclaimer == true &&
+        hasAcknowledgedUsageBoundary == false &&
+        !showStartupOverlay &&
+        !showRestoreScreen
 
     if (!showApplicationShell) {
         if (showStartupOverlay) {
@@ -223,14 +232,26 @@ fun WorkshopNativeRoot(
                 },
             )
         }
-        AppUpdateDialogIfNeeded(
-            appUpdateState = appUpdateState,
-            onDismiss = viewModel::dismissUpdateDialog,
-            onConfirmDownload = { downloadUrl ->
-                viewModel.dismissUpdateDialog()
-                openExternalUrl(downloadUrl)
-            },
-        )
+        if (showDisclaimerDialog) {
+            AppDisclaimerDialogIfNeeded(
+                onConfirm = viewModel::acknowledgeDisclaimer,
+                onOpenRepository = { openExternalUrl(WorkshopNativeAbout.repositoryUrl) },
+            )
+        } else if (showUsageBoundaryDialog) {
+            AppUsageBoundaryDialogIfNeeded(
+                onConfirm = viewModel::acknowledgeUsageBoundary,
+                onOpenRepository = { openExternalUrl(WorkshopNativeAbout.repositoryUrl) },
+            )
+        } else {
+            AppUpdateDialogIfNeeded(
+                appUpdateState = appUpdateState,
+                onDismiss = viewModel::dismissUpdateDialog,
+                onConfirmDownload = { downloadUrl ->
+                    viewModel.dismissUpdateDialog()
+                    openExternalUrl(downloadUrl)
+                },
+            )
+        }
         return
     }
 
@@ -363,15 +384,193 @@ fun WorkshopNativeRoot(
                 }
             }
         }
-        AppUpdateDialogIfNeeded(
-            appUpdateState = appUpdateState,
-            onDismiss = viewModel::dismissUpdateDialog,
-            onConfirmDownload = { downloadUrl ->
-                viewModel.dismissUpdateDialog()
-                openExternalUrl(downloadUrl)
-            },
-        )
+        if (showDisclaimerDialog) {
+            AppDisclaimerDialogIfNeeded(
+                onConfirm = viewModel::acknowledgeDisclaimer,
+                onOpenRepository = { openExternalUrl(WorkshopNativeAbout.repositoryUrl) },
+            )
+        } else if (showUsageBoundaryDialog) {
+            AppUsageBoundaryDialogIfNeeded(
+                onConfirm = viewModel::acknowledgeUsageBoundary,
+                onOpenRepository = { openExternalUrl(WorkshopNativeAbout.repositoryUrl) },
+            )
+        } else {
+            AppUpdateDialogIfNeeded(
+                appUpdateState = appUpdateState,
+                onDismiss = viewModel::dismissUpdateDialog,
+                onConfirmDownload = { downloadUrl ->
+                    viewModel.dismissUpdateDialog()
+                    openExternalUrl(downloadUrl)
+                },
+            )
+        }
     }
+}
+
+@Composable
+private fun AppDisclaimerDialogIfNeeded(
+    onConfirm: () -> Unit,
+    onOpenRepository: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Text("我已了解")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onOpenRepository) {
+                Text("开源地址")
+            }
+        },
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "首次启动说明",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "为减少误用和账户风险，首次使用前请先确认以下内容。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    WorkshopNativeAbout.highlights.forEach { highlight ->
+                        UpdateMetaPill(text = highlight)
+                    }
+                }
+                WorkshopNativeAbout.disclaimerItems.forEach { item ->
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        ),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = item.title,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = item.body,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = "后续可在 设置 > 关于与说明 > 关于 Workshop Native 中再次查看这份说明。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        shape = RoundedCornerShape(28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+    )
+}
+
+@Composable
+private fun AppUsageBoundaryDialogIfNeeded(
+    onConfirm: () -> Unit,
+    onOpenRepository: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Text("继续使用")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onOpenRepository) {
+                Text("项目主页")
+            }
+        },
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "学习交流与使用边界",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "这部分说明只聚焦使用范围、权利边界和反馈方式。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                WorkshopNativeAbout.usageBoundaryItems.forEach { item ->
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        border = BorderStroke(
+                            1.dp,
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        ),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = item.title,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = item.body,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = "后续可在 设置 > 关于与说明 > 学习交流与使用边界 中再次查看。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        shape = RoundedCornerShape(28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+    )
 }
 
 @Composable

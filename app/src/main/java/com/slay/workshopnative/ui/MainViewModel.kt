@@ -60,6 +60,12 @@ class MainViewModel @Inject constructor(
     val appUpdateState: StateFlow<AppUpdateUiState> = _appUpdateState.asStateFlow()
     private val _userMessages = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
+    val hasAcknowledgedDisclaimer: StateFlow<Boolean?> = preferencesStore.preferences
+        .map { it.hasAcknowledgedDisclaimer }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    val hasAcknowledgedUsageBoundary: StateFlow<Boolean?> = preferencesStore.preferences
+        .map { it.hasAcknowledgedUsageBoundary }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val savedAccounts: StateFlow<List<SavedSteamAccount>> = preferencesStore.preferences
         .map { it.savedAccounts }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -153,6 +159,18 @@ class MainViewModel @Inject constructor(
 
     fun dismissUpdateDialog() {
         _appUpdateState.value = _appUpdateState.value.copy(showUpdateDialog = false)
+    }
+
+    fun acknowledgeDisclaimer() {
+        viewModelScope.launch {
+            preferencesStore.saveDisclaimerAcknowledged()
+        }
+    }
+
+    fun acknowledgeUsageBoundary() {
+        viewModelScope.launch {
+            preferencesStore.saveUsageBoundaryAcknowledged()
+        }
     }
 
     private suspend fun checkForAppUpdates(userInitiated: Boolean) {
