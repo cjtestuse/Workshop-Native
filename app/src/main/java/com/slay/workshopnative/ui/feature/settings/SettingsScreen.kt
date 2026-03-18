@@ -121,6 +121,13 @@ fun SettingsScreen(
             viewModel.saveDownloadTree(uri.toString(), label)
         }
     }
+    val logExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri != null) {
+            viewModel.exportSupportLogs(uri)
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -149,7 +156,19 @@ fun SettingsScreen(
                 SettingsPanel {
                     UpdateSettingsRow(
                         uiState = appUpdateUiState,
+                        autoCheckEnabled = uiState.autoCheckAppUpdates,
                         onClick = onCheckAppUpdates,
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                    SettingsBooleanRow(
+                        title = "启动时自动检查更新",
+                        description = if (uiState.autoCheckAppUpdates) {
+                            "当前已开启。应用每次启动时会自动检查一次 GitHub Release。"
+                        } else {
+                            "当前已关闭。不会自动联网检查，但仍可手动点上方立即检查。"
+                        },
+                        checked = uiState.autoCheckAppUpdates,
+                        onCheckedChange = viewModel::saveAutoCheckAppUpdates,
                     )
                 }
             }
@@ -306,6 +325,12 @@ fun SettingsScreen(
 
                     SettingsDestination.DataPrivacy -> DataPrivacyContent(
                         uiState = uiState,
+                        onExportSupportLogs = {
+                            logExportLauncher.launch(uiState.supportLogs.exportFileName)
+                        },
+                        onClearRuntimeLogs = viewModel::clearRuntimeLogs,
+                        onClearCrashLogs = viewModel::clearCrashLogs,
+                        onClearAllSupportLogs = viewModel::clearAllSupportLogs,
                         onClearAccountData = viewModel::clearAllAccountData,
                         onClearOwnedGamesCache = viewModel::clearOwnedGamesCache,
                         onClearFavoriteGames = viewModel::clearFavoriteWorkshopGames,
@@ -732,6 +757,7 @@ private fun SettingsSheetScaffold(
 @Composable
 private fun UpdateSettingsRow(
     uiState: AppUpdateUiState,
+    autoCheckEnabled: Boolean,
     onClick: () -> Unit,
 ) {
     val statusLabel = when {
@@ -760,7 +786,8 @@ private fun UpdateSettingsRow(
         uiState.lastCheckSucceeded == true && uiState.release != null ->
             "已检查到 ${uiState.release.rawTagName}，当前安装版本已是最新。"
         !uiState.summary.isNullOrBlank() -> uiState.summary
-        else -> "当前版本 ${uiState.currentVersionName}，应用启动时会自动检查一次更新。"
+        autoCheckEnabled -> "当前版本 ${uiState.currentVersionName}，应用启动时会自动检查一次更新。"
+        else -> "当前版本 ${uiState.currentVersionName}，已关闭自动检查更新，可手动检查。"
     }
     val metaLine = buildString {
         append("当前 ")
@@ -851,12 +878,48 @@ private fun UpdateSettingsRow(
 @Composable
 private fun DataPrivacyContent(
     uiState: SettingsUiState,
+    onExportSupportLogs: () -> Unit,
+    onClearRuntimeLogs: () -> Unit,
+    onClearCrashLogs: () -> Unit,
+    onClearAllSupportLogs: () -> Unit,
     onClearAccountData: () -> Unit,
     onClearOwnedGamesCache: () -> Unit,
     onClearFavoriteGames: () -> Unit,
     onClearDownloadDiagnostics: () -> Unit,
     onClearDownloadHistory: () -> Unit,
 ) {
+    SettingsSubsectionTitle(
+        title = "问题反馈日志",
+        subtitle = "导出运行日志、错误日志和崩溃日志，方便把问题现场发给作者定位。",
+    )
+    SettingsInlineHint(text = uiState.supportLogs.summary)
+    uiState.supportLogs.latestCrashLabel?.let { latestCrash ->
+        SettingsInlineHint(text = latestCrash)
+    }
+    SettingsInlineHint(text = uiState.supportLogs.retentionSummary)
+    SettingsActionButton(
+        text = if (uiState.supportLogs.isExporting) "正在导出日志包…" else "导出诊断日志包",
+        enabled = !uiState.supportLogs.isExporting,
+        onClick = onExportSupportLogs,
+    )
+    SettingsActionButton(
+        text = "清除运行日志",
+        enabled = uiState.supportLogs.hasRuntimeLogs && !uiState.supportLogs.isExporting,
+        onClick = onClearRuntimeLogs,
+    )
+    SettingsActionButton(
+        text = "清除崩溃日志",
+        enabled = uiState.supportLogs.hasCrashLogs && !uiState.supportLogs.isExporting,
+        onClick = onClearCrashLogs,
+    )
+    SettingsActionButton(
+        text = "清除全部日志文件",
+        enabled = uiState.supportLogs.hasAnyLogs && !uiState.supportLogs.isExporting,
+        onClick = onClearAllSupportLogs,
+    )
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
     SettingsSubsectionTitle(
         title = "本地保存内容",
         subtitle = "以下数据只保存在当前设备，用于登录恢复、下载管理和界面体验。",
@@ -1231,10 +1294,12 @@ private fun SettingsChoiceChip(
 @Composable
 private fun SettingsActionButton(
     text: String,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     OutlinedButton(
         onClick = onClick,
+        enabled = enabled,
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
     ) {

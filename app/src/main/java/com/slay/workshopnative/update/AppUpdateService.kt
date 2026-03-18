@@ -1,6 +1,7 @@
 package com.slay.workshopnative.update
 
 import com.slay.workshopnative.BuildConfig
+import com.slay.workshopnative.core.logging.AppLog
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -19,6 +20,13 @@ class AppUpdateService @Inject constructor(
     baseClient: OkHttpClient,
     private val json: Json,
 ) {
+    private companion object {
+        const val LOG_TAG = "AppUpdateService"
+        const val CONNECT_TIMEOUT_SECONDS = 8L
+        const val READ_TIMEOUT_SECONDS = 12L
+        const val USER_AGENT = "WorkshopNative-Update"
+    }
+
     private class HttpStatusException(
         val statusCode: Int,
         message: String,
@@ -34,6 +42,10 @@ class AppUpdateService @Inject constructor(
         currentVersion: String,
         preferredSource: AppUpdateSource,
     ): AppUpdateCheckResult = withContext(Dispatchers.IO) {
+        AppLog.i(
+            LOG_TAG,
+            "checkForUpdates currentVersion=$currentVersion preferredSource=${preferredSource.name}",
+        )
         if (!isConfigured()) {
             return@withContext AppUpdateCheckResult.Failure(
                 errorSummary = "尚未配置更新仓库。",
@@ -51,6 +63,7 @@ class AppUpdateService @Inject constructor(
                 releaseInfo = parsed
                 break
             } catch (error: Throwable) {
+                AppLog.w(LOG_TAG, "fetchLatestRelease failed source=${source.name}", error)
                 lastErrorSummary = "${source.displayName}: ${summarizeError(error)}"
             }
         }
@@ -58,6 +71,7 @@ class AppUpdateService @Inject constructor(
         val metadataSource = successfulMetadataSource
         val release = releaseInfo
         if (metadataSource == null || release == null) {
+            AppLog.w(LOG_TAG, "checkForUpdates failed because metadata is unavailable: $lastErrorSummary")
             return@withContext AppUpdateCheckResult.Failure(
                 errorSummary = lastErrorSummary,
             )
@@ -68,6 +82,7 @@ class AppUpdateService @Inject constructor(
             remoteVersionTag = release.normalizedVersion,
         )
         if (!hasUpdate) {
+            AppLog.i(LOG_TAG, "checkForUpdates no update available remote=${release.rawTagName}")
             return@withContext AppUpdateCheckResult.Success(
                 currentVersion = currentVersion,
                 release = release,
@@ -91,6 +106,11 @@ class AppUpdateService @Inject constructor(
             },
             release = release,
             metadataSource = metadataSource,
+        )
+
+        AppLog.i(
+            LOG_TAG,
+            "checkForUpdates found update remote=${release.rawTagName} asset=${downloadResolution.assetName}",
         )
 
         AppUpdateCheckResult.Success(
@@ -337,10 +357,4 @@ class AppUpdateService @Inject constructor(
         @SerialName("browser_download_url")
         val browserDownloadUrl: String = "",
     )
-
-    private companion object {
-        const val CONNECT_TIMEOUT_SECONDS = 8L
-        const val READ_TIMEOUT_SECONDS = 12L
-        const val USER_AGENT = "WorkshopNative-Update"
-    }
 }

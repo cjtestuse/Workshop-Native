@@ -1,6 +1,7 @@
 package com.slay.workshopnative.ui
 
 import com.slay.workshopnative.BuildConfig
+import com.slay.workshopnative.core.logging.AppLog
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.slay.workshopnative.data.model.SteamSessionState
@@ -50,6 +51,9 @@ class MainViewModel @Inject constructor(
     private val downloadsRepository: DownloadsRepository,
     private val appUpdateService: AppUpdateService,
 ) : ViewModel() {
+    private companion object {
+        const val LOG_TAG = "MainViewModel"
+    }
 
     val sessionState: StateFlow<SteamSessionState> = steamRepository.sessionState
     private val _isBootstrapping = MutableStateFlow(true)
@@ -75,6 +79,8 @@ class MainViewModel @Inject constructor(
             val prefs = preferencesStore.snapshot()
             runCatching {
                 steamRepository.bootstrap()
+            }.onFailure { error ->
+                AppLog.w(LOG_TAG, "bootstrap failed", error)
             }
             val currentStatus = steamRepository.sessionState.value.status
             if (prefs.defaultGuestMode && currentStatus != SessionStatus.Authenticated) {
@@ -103,7 +109,12 @@ class MainViewModel @Inject constructor(
                 }
         }
         viewModelScope.launch {
-            checkForAppUpdates(userInitiated = false)
+            val prefs = preferencesStore.snapshot()
+            if (prefs.autoCheckAppUpdates) {
+                checkForAppUpdates(userInitiated = false)
+            } else {
+                AppLog.i(LOG_TAG, "skip auto app update check because it is disabled")
+            }
         }
     }
 
@@ -176,11 +187,14 @@ class MainViewModel @Inject constructor(
     private suspend fun checkForAppUpdates(userInitiated: Boolean) {
         val previousState = _appUpdateState.value
         if (previousState.isChecking) {
+            AppLog.i(LOG_TAG, "app update check ignored because one is already running")
             if (userInitiated) {
                 _userMessages.emit("正在检查更新")
             }
             return
         }
+
+        AppLog.i(LOG_TAG, "starting app update check userInitiated=$userInitiated")
 
         _appUpdateState.value = previousState.copy(
             isChecking = true,
@@ -205,6 +219,10 @@ class MainViewModel @Inject constructor(
                     lastCheckSucceeded = true,
                     showUpdateDialog = result.hasUpdate,
                 )
+                AppLog.i(
+                    LOG_TAG,
+                    "app update check succeeded hasUpdate=${result.hasUpdate} release=${result.release.rawTagName}",
+                )
                 if (userInitiated && !result.hasUpdate) {
                     _userMessages.emit("已经是最新版本 ${AppUpdateVersioning.normalizeVersionTag(result.currentVersion)}")
                 }
@@ -222,6 +240,7 @@ class MainViewModel @Inject constructor(
                     lastCheckSucceeded = false,
                     showUpdateDialog = false,
                 )
+                AppLog.w(LOG_TAG, "app update check failed summary=${result.errorSummary}")
                 if (userInitiated) {
                     _userMessages.emit(result.errorSummary)
                 }

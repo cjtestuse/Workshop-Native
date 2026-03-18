@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.room.Room
 import androidx.work.WorkManager
 import com.slay.workshopnative.BuildConfig
+import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.data.local.AppDatabase
 import com.slay.workshopnative.data.local.DownloadTaskDao
 import dagger.Module
@@ -37,7 +38,9 @@ object AppModule {
     fun provideOkHttpClient(
         @ApplicationContext context: Context,
     ): OkHttpClient {
-        val logging = HttpLoggingInterceptor().apply {
+        val logging = HttpLoggingInterceptor { message ->
+            AppLog.i("OkHttp", message)
+        }.apply {
             level = if (BuildConfig.DEBUG) {
                 HttpLoggingInterceptor.Level.BASIC
             } else {

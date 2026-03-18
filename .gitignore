@@ -28,3 +28,8 @@ captures/
 # Generated release artifacts
 workshop-native-*.apk
 SHA256SUMS.txt
+
+# Local investigation artifacts
+artifacts/
+error_pic/
+in/

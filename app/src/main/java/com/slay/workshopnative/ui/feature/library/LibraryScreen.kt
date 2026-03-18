@@ -36,6 +36,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -65,6 +66,7 @@ import com.slay.workshopnative.data.model.FavoriteWorkshopGame
 import com.slay.workshopnative.data.model.GameDetails
 import com.slay.workshopnative.data.model.OwnedGame
 import com.slay.workshopnative.ui.components.ArtworkThumbnail
+import com.slay.workshopnative.ui.components.ExpandableBodyText
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -72,6 +74,7 @@ fun LibraryScreen(
     paddingValues: PaddingValues,
     accountName: String,
     onOpenGame: (Int, String) -> Unit,
+    onOpenSubscriptions: (Int, String) -> Unit,
     viewModel: LibraryViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -184,6 +187,11 @@ fun LibraryScreen(
                             viewModel.markWorkshopOpened(game.appId)
                             onOpenGame(game.appId, game.name)
                         },
+                        onOpenSubscriptions = { game ->
+                            focusManager.clearFocus(force = true)
+                            viewModel.markWorkshopOpened(game.appId)
+                            onOpenSubscriptions(game.appId, game.name)
+                        },
                     )
                     gamesSection(
                         title = "已购买",
@@ -207,6 +215,11 @@ fun LibraryScreen(
                             viewModel.markWorkshopOpened(game.appId)
                             onOpenGame(game.appId, game.name)
                         },
+                        onOpenSubscriptions = { game ->
+                            focusManager.clearFocus(force = true)
+                            viewModel.markWorkshopOpened(game.appId)
+                            onOpenSubscriptions(game.appId, game.name)
+                        },
                     )
                     gamesSection(
                         title = "家庭共享",
@@ -229,6 +242,11 @@ fun LibraryScreen(
                             focusManager.clearFocus(force = true)
                             viewModel.markWorkshopOpened(game.appId)
                             onOpenGame(game.appId, game.name)
+                        },
+                        onOpenSubscriptions = { game ->
+                            focusManager.clearFocus(force = true)
+                            viewModel.markWorkshopOpened(game.appId)
+                            onOpenSubscriptions(game.appId, game.name)
                         },
                     )
                 }
@@ -257,6 +275,11 @@ fun LibraryScreen(
                     selectedGame.value = null
                     viewModel.markWorkshopOpened(game.appId)
                     onOpenGame(game.appId, game.name)
+                },
+                onOpenSubscriptions = {
+                    selectedGame.value = null
+                    viewModel.markWorkshopOpened(game.appId)
+                    onOpenSubscriptions(game.appId, game.name)
                 },
             )
         }
@@ -425,6 +448,7 @@ private fun LazyListScope.gamesSection(
     onShowDetails: (OwnedGame) -> Unit,
     onToggleFavorite: (OwnedGame) -> Unit,
     onOpenWorkshop: (OwnedGame) -> Unit,
+    onOpenSubscriptions: (OwnedGame) -> Unit,
 ) {
     if (games.isEmpty()) return
     item(key = "section_$title") {
@@ -440,6 +464,7 @@ private fun LazyListScope.gamesSection(
             onShowDetails = { onShowDetails(game) },
             onToggleFavorite = { onToggleFavorite(game) },
             onOpenWorkshop = { onOpenWorkshop(game) },
+            onOpenSubscriptions = { onOpenSubscriptions(game) },
         )
     }
 }
@@ -449,6 +474,7 @@ private fun LazyListScope.favoriteGamesSection(
     onShowDetails: (FavoriteWorkshopGame) -> Unit,
     onToggleFavorite: (FavoriteWorkshopGame) -> Unit,
     onOpenWorkshop: (FavoriteWorkshopGame) -> Unit,
+    onOpenSubscriptions: (FavoriteWorkshopGame) -> Unit,
 ) {
     if (games.isEmpty()) return
     item(key = "section_favorites") {
@@ -463,6 +489,7 @@ private fun LazyListScope.favoriteGamesSection(
             onShowDetails = { onShowDetails(game) },
             onToggleFavorite = { onToggleFavorite(game) },
             onOpenWorkshop = { onOpenWorkshop(game) },
+            onOpenSubscriptions = { onOpenSubscriptions(game) },
         )
     }
 }
@@ -500,6 +527,7 @@ private fun GameRow(
     onShowDetails: () -> Unit,
     onToggleFavorite: () -> Unit,
     onOpenWorkshop: () -> Unit,
+    onOpenSubscriptions: () -> Unit,
 ) {
     Card(
         shape = RoundedCornerShape(24.dp),
@@ -583,6 +611,10 @@ private fun GameRow(
                             },
                         )
                     }
+                    SecondaryActionCapsule(
+                        text = "我的订阅",
+                        onClick = onOpenSubscriptions,
+                    )
                     ActionCapsule(
                         text = "进入工坊",
                         onClick = onOpenWorkshop,
@@ -601,6 +633,7 @@ private fun GameDetailsSheet(
     isFavorite: Boolean,
     onToggleFavorite: () -> Unit,
     onOpenWorkshop: () -> Unit,
+    onOpenSubscriptions: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -709,10 +742,9 @@ private fun GameDetailsSheet(
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.SemiBold,
                             )
-                            Text(
+                            ExpandableBodyText(
                                 text = description,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                collapsedMaxLines = 7,
                             )
                         }
                     }
@@ -761,6 +793,12 @@ private fun GameDetailsSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                OutlinedButton(
+                    onClick = onOpenSubscriptions,
+                    shape = RoundedCornerShape(20.dp),
+                ) {
+                    Text("我的订阅")
+                }
                 Button(
                     onClick = onOpenWorkshop,
                     shape = RoundedCornerShape(20.dp),
@@ -785,6 +823,7 @@ private fun FavoriteWorkshopRow(
     onShowDetails: () -> Unit,
     onToggleFavorite: () -> Unit,
     onOpenWorkshop: () -> Unit,
+    onOpenSubscriptions: () -> Unit,
 ) {
     Card(
         shape = RoundedCornerShape(24.dp),
@@ -851,6 +890,10 @@ private fun FavoriteWorkshopRow(
                             tint = MaterialTheme.colorScheme.primary,
                         )
                     }
+                    SecondaryActionCapsule(
+                        text = "我的订阅",
+                        onClick = onOpenSubscriptions,
+                    )
                     ActionCapsule(
                         text = "进入工坊",
                         onClick = onOpenWorkshop,
@@ -969,6 +1012,31 @@ private fun ActionCapsule(
             Text(
                 text = text,
                 color = Color.White,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SecondaryActionCapsule(
+    text: String,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.clickable(onClick = onClick),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f)),
+    ) {
+        Box(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = text,
+                color = MaterialTheme.colorScheme.onSurface,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
             )

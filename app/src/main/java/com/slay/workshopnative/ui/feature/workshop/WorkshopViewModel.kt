@@ -3,6 +3,7 @@ package com.slay.workshopnative.ui.feature.workshop
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.local.DownloadTaskEntity
 import com.slay.workshopnative.data.model.SessionStatus
@@ -28,6 +29,7 @@ import kotlinx.coroutines.launch
 data class WorkshopUiState(
     val appId: Int = 0,
     val appName: String = "",
+    val launchMode: WorkshopLaunchMode = WorkshopLaunchMode.Browse,
     val isRefreshing: Boolean = false,
     val isLoadingMore: Boolean = false,
     val hasLoadedOnce: Boolean = false,
@@ -57,6 +59,9 @@ class WorkshopViewModel @Inject constructor(
     private val downloadsRepository: DownloadsRepository,
     private val preferencesStore: UserPreferencesStore,
 ) : ViewModel() {
+    private companion object {
+        const val LOG_TAG = "WorkshopViewModel"
+    }
 
     private val _uiState = MutableStateFlow(WorkshopUiState())
     val uiState: StateFlow<WorkshopUiState> = _uiState.asStateFlow()
@@ -79,10 +84,16 @@ class WorkshopViewModel @Inject constructor(
         observeDownloads()
     }
 
-    fun bindApp(appId: Int, appName: String) {
+    fun bindApp(appId: Int, appName: String, launchMode: WorkshopLaunchMode) {
         val decodedAppName = Uri.decode(appName)
         val currentState = _uiState.value
-        if (currentState.appId == appId && currentState.appName == decodedAppName) return
+        if (
+            currentState.appId == appId &&
+            currentState.appName == decodedAppName &&
+            currentState.launchMode == launchMode
+        ) {
+            return
+        }
 
         metadataRequestsInFlight.clear()
         resolvedItemsCache.clear()
@@ -90,15 +101,32 @@ class WorkshopViewModel @Inject constructor(
             it.copy(
                 appId = appId,
                 appName = decodedAppName,
+                launchMode = launchMode,
                 isRefreshing = false,
                 isLoadingMore = false,
                 hasLoadedOnce = false,
                 isResolvingSelection = false,
                 items = emptyList(),
-                query = WorkshopBrowseQuery(pageSize = workshopPageSize),
+                query = WorkshopBrowseQuery(
+                    sectionKey = if (launchMode == WorkshopLaunchMode.Subscriptions) {
+                        WorkshopBrowseQuery.SECTION_MY_SUBSCRIPTIONS
+                    } else {
+                        WorkshopBrowseQuery.SECTION_ITEMS
+                    },
+                    pageSize = workshopPageSize,
+                ),
                 totalCount = 0,
                 hasMore = false,
-                sectionOptions = emptyList(),
+                sectionOptions = if (launchMode == WorkshopLaunchMode.Subscriptions) {
+                    listOf(
+                        WorkshopBrowseSectionOption(
+                            key = WorkshopBrowseQuery.SECTION_MY_SUBSCRIPTIONS,
+                            label = "我的订阅",
+                        ),
+                    )
+                } else {
+                    emptyList()
+                },
                 sortOptions = emptyList(),
                 periodOptions = emptyList(),
                 tagGroups = emptyList(),
@@ -112,6 +140,16 @@ class WorkshopViewModel @Inject constructor(
         }
 
         refresh(forceRefresh = false)
+    }
+
+    fun switchToBrowseMode() {
+        val state = _uiState.value
+        if (state.appId <= 0 || state.launchMode == WorkshopLaunchMode.Browse) return
+        bindApp(
+            appId = state.appId,
+            appName = state.appName,
+            launchMode = WorkshopLaunchMode.Browse,
+        )
     }
 
     fun refresh(forceRefresh: Boolean = true) {
@@ -205,6 +243,11 @@ class WorkshopViewModel @Inject constructor(
                     }
                 }
                 .onFailure { error ->
+                    AppLog.w(
+                        LOG_TAG,
+                        "openItemDetails failed publishedFileId=${item.publishedFileId}",
+                        error,
+                    )
                     _uiState.update {
                         it.copy(
                             isResolvingSelection = false,
@@ -249,6 +292,11 @@ class WorkshopViewModel @Inject constructor(
                     }
                 }
                 .onFailure { error ->
+                    AppLog.w(
+                        LOG_TAG,
+                        "enqueueDownload failed publishedFileId=${targetItem.publishedFileId}",
+                        error,
+                    )
                     _uiState.update {
                         it.copy(errorMessage = error.toUserMessage("无法开始下载"))
                     }
@@ -292,11 +340,27 @@ class WorkshopViewModel @Inject constructor(
                 )
             }
 
-            steamRepository.loadWorkshopBrowsePage(appId, request, forceRefresh)
+            val pageResult = when (state.launchMode) {
+                WorkshopLaunchMode.Browse ->
+                    steamRepository.loadWorkshopBrowsePage(appId, request, forceRefresh)
+                WorkshopLaunchMode.Subscriptions ->
+                    steamRepository.loadSubscribedWorkshopPage(
+                        appId = appId,
+                        page = request.page,
+                        pageSize = request.pageSize,
+                        forceRefresh = forceRefresh,
+                    )
+            }
+            pageResult
                 .onSuccess { page ->
                     applyLoadedPage(page = page, request = request)
                 }
                 .onFailure { error ->
+                    AppLog.w(
+                        LOG_TAG,
+                        "loadPage failed appId=$appId page=${request.page}",
+                        error,
+                    )
                     _uiState.update {
                         it.copy(
                             isRefreshing = false,
@@ -427,14 +491,60 @@ class WorkshopViewModel @Inject constructor(
 
     private fun WorkshopItem.mergeBrowseState(browseItem: WorkshopItem): WorkshopItem {
         return copy(
-            shortDescription = shortDescription.ifBlank { browseItem.shortDescription },
-            description = description.ifBlank { browseItem.description },
+            title = preferWorkshopTitle(title, browseItem.title),
+            shortDescription = preferLongerWorkshopText(shortDescription, browseItem.shortDescription),
+            description = preferLongerWorkshopText(description, browseItem.description),
             previewUrl = browseItem.previewUrl ?: previewUrl,
             authorName = authorName.ifBlank { browseItem.authorName },
             detailUrl = detailUrl ?: browseItem.detailUrl,
             isSubscribed = isSubscribed || browseItem.isSubscribed,
             isDownloadInfoResolved = isDownloadInfoResolved || browseItem.isDownloadInfoResolved,
         )
+    }
+
+    private fun preferLongerWorkshopText(
+        primary: String,
+        fallback: String,
+    ): String {
+        return when {
+            primary.isBlank() -> fallback
+            fallback.isBlank() -> primary
+            fallback.length > primary.length -> fallback
+            else -> primary
+        }
+    }
+
+    private fun preferWorkshopTitle(
+        primary: String,
+        fallback: String,
+    ): String {
+        if (primary.isBlank() || primary.startsWith("Workshop #")) {
+            return fallback.ifBlank { primary }
+        }
+        if (fallback.isBlank()) return primary
+        return if (primary.isLikelyInternalWorkshopTitle() && fallback.containsCjkCharacters()) {
+            fallback
+        } else {
+            primary
+        }
+    }
+
+    private fun String.isLikelyInternalWorkshopTitle(): Boolean {
+        return isNotBlank() &&
+            all { it.code in 32..126 } &&
+            any { it.isLetter() } &&
+            none { it.isWhitespace() }
+    }
+
+    private fun String.containsCjkCharacters(): Boolean {
+        return any { character ->
+            Character.UnicodeScript.of(character.code) in setOf(
+                Character.UnicodeScript.HAN,
+                Character.UnicodeScript.HIRAGANA,
+                Character.UnicodeScript.KATAKANA,
+                Character.UnicodeScript.HANGUL,
+            )
+        }
     }
 
     private fun resolveMetadataForTargets(

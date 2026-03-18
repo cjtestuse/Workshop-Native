@@ -15,6 +15,7 @@ data class WorkshopBrowseQuery(
         const val DEFAULT_PAGE_SIZE = 10
         val PAGE_SIZE_OPTIONS = listOf(5, 10, 20)
         const val SECTION_ITEMS = "readytouseitems"
+        const val SECTION_MY_SUBSCRIPTIONS = "mysubscriptions"
         const val SORT_TREND = "trend"
 
         fun normalizePageSize(pageSize: Int): Int {

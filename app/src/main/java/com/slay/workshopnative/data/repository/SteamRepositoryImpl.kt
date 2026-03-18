@@ -84,6 +84,22 @@ class SteamRepositoryImpl @Inject constructor(
         return runCatching { sessionManager.loadWorkshopBrowsePage(appId, query, forceRefresh) }
     }
 
+    override suspend fun loadSubscribedWorkshopPage(
+        appId: Int,
+        page: Int,
+        pageSize: Int,
+        forceRefresh: Boolean,
+    ): Result<WorkshopBrowsePage> {
+        return runCatching {
+            sessionManager.loadSubscribedWorkshopPage(
+                appId = appId,
+                page = page,
+                pageSize = pageSize,
+                forceRefresh = forceRefresh,
+            )
+        }
+    }
+
     override suspend fun resolveWorkshopItems(publishedFileIds: Collection<Long>): Result<List<WorkshopItem>> {
         return runCatching { sessionManager.resolveWorkshopItems(publishedFileIds) }
     }

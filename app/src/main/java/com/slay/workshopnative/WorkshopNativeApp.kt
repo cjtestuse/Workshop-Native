@@ -7,6 +7,7 @@ import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
+import com.slay.workshopnative.core.logging.AppLog
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 import okio.Path.Companion.toOkioPath
@@ -19,6 +20,7 @@ class WorkshopNativeApp : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
+        AppLog.initialize(this)
         SingletonImageLoader.setSafe { context ->
             ImageLoader.Builder(context)
                 .memoryCache {

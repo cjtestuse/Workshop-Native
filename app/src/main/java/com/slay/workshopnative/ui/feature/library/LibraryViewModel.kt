@@ -2,6 +2,7 @@ package com.slay.workshopnative.ui.feature.library
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.model.FavoriteWorkshopGame
 import com.slay.workshopnative.data.model.GameDetails
@@ -34,6 +35,9 @@ class LibraryViewModel @Inject constructor(
     private val steamRepository: SteamRepository,
     private val favoritesRepository: WorkshopFavoritesRepository,
 ) : ViewModel() {
+    private companion object {
+        const val LOG_TAG = "LibraryViewModel"
+    }
 
     private val _uiState = MutableStateFlow(LibraryUiState())
     val uiState: StateFlow<LibraryUiState> = _uiState.asStateFlow()
@@ -80,6 +84,7 @@ class LibraryViewModel @Inject constructor(
                     }
                 }
                 .onFailure { error ->
+                    AppLog.w(LOG_TAG, "refresh failed forceRefresh=$forceRefresh", error)
                     _uiState.update {
                         it.copy(
                             isLoading = false,

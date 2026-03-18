@@ -2,6 +2,7 @@ package com.slay.workshopnative.ui.feature.explore
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.model.FavoriteWorkshopGame
 import com.slay.workshopnative.data.model.GameDetails
@@ -44,6 +45,9 @@ class ExploreViewModel @Inject constructor(
     private val steamRepository: SteamRepository,
     private val favoritesRepository: WorkshopFavoritesRepository,
 ) : ViewModel() {
+    private companion object {
+        const val LOG_TAG = "ExploreViewModel"
+    }
 
     private val _uiState = MutableStateFlow(ExploreUiState())
     val uiState: StateFlow<ExploreUiState> = _uiState.asStateFlow()
@@ -165,6 +169,7 @@ class ExploreViewModel @Inject constructor(
                     }
                 }
                 .onFailure { error ->
+                    AppLog.w(LOG_TAG, "loadExplorePage failed page=$page", error)
                     _uiState.update {
                         it.copy(
                             isLoading = false,
@@ -191,6 +196,7 @@ class ExploreViewModel @Inject constructor(
                 }
             }
             .onFailure { error ->
+                AppLog.w(LOG_TAG, "runSearch failed query=$normalized", error)
                 if (_uiState.value.query.trim() == normalized) {
                     _uiState.update {
                         it.copy(

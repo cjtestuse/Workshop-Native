@@ -7,7 +7,6 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.MediaStore
-import android.util.Log
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -67,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.slay.workshopnative.core.logging.AppLog as Log
 import com.slay.workshopnative.core.storage.MEDIASTORE_DOWNLOADS_URI_STRING
 import com.slay.workshopnative.core.util.formatBytes
 import com.slay.workshopnative.data.local.DownloadAuthMode

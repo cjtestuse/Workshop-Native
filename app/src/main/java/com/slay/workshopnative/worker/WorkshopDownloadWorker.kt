@@ -7,13 +7,13 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.documentfile.provider.DocumentFile
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import com.slay.workshopnative.core.logging.AppLog as Log
 import com.slay.workshopnative.core.storage.clearDownloadStaging
 import com.slay.workshopnative.core.storage.copyLocalFileToUri
 import com.slay.workshopnative.core.storage.createMediaStoreFileUri

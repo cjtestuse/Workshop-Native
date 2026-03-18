@@ -47,6 +47,13 @@ interface SteamRepository {
         forceRefresh: Boolean = false,
     ): Result<WorkshopBrowsePage>
 
+    suspend fun loadSubscribedWorkshopPage(
+        appId: Int,
+        page: Int,
+        pageSize: Int,
+        forceRefresh: Boolean = false,
+    ): Result<WorkshopBrowsePage>
+
     suspend fun resolveWorkshopItems(publishedFileIds: Collection<Long>): Result<List<WorkshopItem>>
 
     suspend fun resolveWorkshopItem(publishedFileId: Long): Result<WorkshopItem>

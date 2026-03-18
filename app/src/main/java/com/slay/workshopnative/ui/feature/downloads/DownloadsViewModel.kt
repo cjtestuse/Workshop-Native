@@ -2,6 +2,7 @@ package com.slay.workshopnative.ui.feature.downloads
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.data.local.DownloadTaskEntity
 import com.slay.workshopnative.data.repository.DownloadsRepository
 import com.slay.workshopnative.data.repository.SteamRepository
@@ -22,6 +23,9 @@ class DownloadsViewModel @Inject constructor(
     private val downloadsRepository: DownloadsRepository,
     private val steamRepository: SteamRepository,
 ) : ViewModel() {
+    private companion object {
+        const val LOG_TAG = "DownloadsViewModel"
+    }
 
     val downloads: StateFlow<List<DownloadTaskEntity>> = downloadsRepository.downloads
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -50,8 +54,9 @@ class DownloadsViewModel @Inject constructor(
                 .onSuccess {
                     _messages.emit("已删除这条下载记录")
                 }
-                .onFailure {
-                    _messages.emit(it.message ?: "删除记录失败")
+                .onFailure { error ->
+                    AppLog.w(LOG_TAG, "delete failed taskId=$taskId", error)
+                    _messages.emit(error.message ?: "删除记录失败")
                 }
         }
     }
@@ -62,8 +67,9 @@ class DownloadsViewModel @Inject constructor(
                 .onSuccess {
                     _messages.emit("已重新加入下载队列")
                 }
-                .onFailure {
-                    _messages.emit(it.message ?: "重试失败")
+                .onFailure { error ->
+                    AppLog.w(LOG_TAG, "retry failed taskId=$taskId", error)
+                    _messages.emit(error.message ?: "重试失败")
                 }
         }
     }
@@ -81,8 +87,9 @@ class DownloadsViewModel @Inject constructor(
                 .onSuccess {
                     _messages.emit("已继续下载")
                 }
-                .onFailure {
-                    _messages.emit(it.message ?: "继续下载失败")
+                .onFailure { error ->
+                    AppLog.w(LOG_TAG, "resume failed taskId=$taskId", error)
+                    _messages.emit(error.message ?: "继续下载失败")
                 }
         }
     }

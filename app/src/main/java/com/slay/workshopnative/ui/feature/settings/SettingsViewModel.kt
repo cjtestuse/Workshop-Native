@@ -1,7 +1,9 @@
 package com.slay.workshopnative.ui.feature.settings
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.core.storage.DEFAULT_DOWNLOAD_FOLDER_NAME
 import com.slay.workshopnative.core.storage.normalizeDownloadFolderName
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
@@ -26,12 +28,37 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import javax.inject.Inject
+
+data class SupportLogUiState(
+    val runtimeLogCount: Int = 0,
+    val crashLogCount: Int = 0,
+    val totalSizeLabel: String = "0 B",
+    val summary: String = "当前还没有可导出的日志文件。",
+    val latestCrashLabel: String? = null,
+    val retentionSummary: String = AppLog.retentionPolicySummary(),
+    val exportFileName: String = supportLogExportFileName(),
+    val isExporting: Boolean = false,
+) {
+    val hasRuntimeLogs: Boolean
+        get() = runtimeLogCount > 0
+
+    val hasCrashLogs: Boolean
+        get() = crashLogCount > 0
+
+    val hasAnyLogs: Boolean
+        get() = hasRuntimeLogs || hasCrashLogs
+}
 
 data class SettingsUiState(
     val accountName: String = "",
     val avatarUrl: String? = null,
     val savedAccounts: List<SavedSteamAccount> = emptyList(),
+    val autoCheckAppUpdates: Boolean = true,
     val defaultGuestMode: Boolean = true,
     val downloadFolderName: String = DEFAULT_DOWNLOAD_FOLDER_NAME,
     val effectiveDownloadFolderName: String = DEFAULT_DOWNLOAD_FOLDER_NAME,
@@ -44,6 +71,7 @@ data class SettingsUiState(
     val cdnPoolPreference: CdnPoolPreference = CdnPoolPreference.Auto,
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
     val workshopAutoResolveVisibleItems: Boolean = true,
+    val supportLogs: SupportLogUiState = SupportLogUiState(),
     val maintenanceSummary: String? = null,
 )
 
@@ -57,6 +85,7 @@ class SettingsViewModel @Inject constructor(
 
     private val avatarUrl = MutableStateFlow<String?>(null)
     private val maintenanceState = MutableStateFlow(MaintenanceUiState())
+    private val supportLogsState = MutableStateFlow(SupportLogUiState())
     private val preferences = preferencesStore.preferences
 
     val uiState: StateFlow<SettingsUiState> = combine(
@@ -64,7 +93,8 @@ class SettingsViewModel @Inject constructor(
         steamRepository.sessionState,
         avatarUrl,
         maintenanceState,
-    ) { prefs, session, avatar, maintenance ->
+        supportLogsState,
+    ) { prefs, session, avatar, maintenance, supportLogs ->
         val accountName = session.account?.accountName
             ?.takeIf(String::isNotBlank)
             ?: prefs.accountName
@@ -74,6 +104,7 @@ class SettingsViewModel @Inject constructor(
             accountName = accountName,
             avatarUrl = avatar,
             savedAccounts = prefs.savedAccounts,
+            autoCheckAppUpdates = prefs.autoCheckAppUpdates,
             defaultGuestMode = prefs.defaultGuestMode,
             downloadFolderName = prefs.downloadFolderName,
             effectiveDownloadFolderName = effectiveFolderName,
@@ -86,6 +117,7 @@ class SettingsViewModel @Inject constructor(
             cdnPoolPreference = prefs.cdnPoolPreference,
             workshopPageSize = prefs.workshopPageSize,
             workshopAutoResolveVisibleItems = prefs.workshopAutoResolveVisibleItems,
+            supportLogs = supportLogs,
             maintenanceSummary = maintenance.summary,
         )
     }.stateIn(
@@ -109,6 +141,7 @@ class SettingsViewModel @Inject constructor(
                     avatarUrl.value = fetchAvatarUrl(steamId64)
                 }
         }
+        refreshSupportLogs()
     }
 
     fun saveDownloadTree(uri: String, label: String) {
@@ -139,6 +172,19 @@ class SettingsViewModel @Inject constructor(
     fun saveDefaultGuestMode(enabled: Boolean) {
         viewModelScope.launch {
             preferencesStore.saveDefaultGuestMode(enabled)
+        }
+    }
+
+    fun saveAutoCheckAppUpdates(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveAutoCheckAppUpdates(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启启动时自动检查更新。"
+                } else {
+                    "已关闭启动时自动检查更新，仍可手动检查。"
+                },
+            )
         }
     }
 
@@ -239,6 +285,67 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun exportSupportLogs(targetUri: Uri) {
+        viewModelScope.launch {
+            supportLogsState.value = supportLogsState.value.copy(isExporting = true)
+            val result = AppLog.exportToUri(targetUri)
+            supportLogsState.value = supportLogsState.value.copy(isExporting = false)
+            maintenanceState.value = MaintenanceUiState(
+                summary = result.fold(
+                    onSuccess = { exported ->
+                        "已导出日志包 ${exported.fileName}，共 ${exported.exportedEntryCount} 个文件，大小 ${formatBytes(exported.totalBytes)}。"
+                    },
+                    onFailure = { error ->
+                        "日志导出失败：${error.message ?: "无法写入目标文件"}"
+                    },
+                ),
+            )
+            refreshSupportLogs()
+        }
+    }
+
+    fun clearRuntimeLogs() {
+        viewModelScope.launch {
+            val deleted = AppLog.clearRuntimeLogs()
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (deleted.deletedFileCount > 0) {
+                    "已清除 ${deleted.deletedFileCount} 份运行日志，释放 ${formatBytes(deleted.reclaimedBytes)}。"
+                } else {
+                    "当前没有可清除的运行日志。"
+                },
+            )
+            refreshSupportLogs()
+        }
+    }
+
+    fun clearCrashLogs() {
+        viewModelScope.launch {
+            val deleted = AppLog.clearCrashLogs()
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (deleted.deletedFileCount > 0) {
+                    "已清除 ${deleted.deletedFileCount} 份崩溃日志，释放 ${formatBytes(deleted.reclaimedBytes)}。"
+                } else {
+                    "当前没有可清除的崩溃日志。"
+                },
+            )
+            refreshSupportLogs()
+        }
+    }
+
+    fun clearAllSupportLogs() {
+        viewModelScope.launch {
+            val deleted = AppLog.clearAllLogs()
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (deleted.deletedFileCount > 0) {
+                    "已清除全部日志文件，共 ${deleted.deletedFileCount} 份，释放 ${formatBytes(deleted.reclaimedBytes)}。"
+                } else {
+                    "当前没有可清除的日志文件。"
+                },
+            )
+            refreshSupportLogs()
+        }
+    }
+
     private suspend fun fetchAvatarUrl(steamId64: Long): String? {
         if (steamId64 <= 0L) return null
         return withContext(Dispatchers.IO) {
@@ -252,15 +359,74 @@ class SettingsViewModel @Inject constructor(
                     val payload = response.body?.string().orEmpty()
                     AVATAR_REGEX.find(payload)?.groupValues?.getOrNull(1)
                 }
+            }.onFailure { error ->
+                AppLog.w(LOG_TAG, "fetchAvatarUrl failed steamId64=$steamId64", error)
             }.getOrNull()
         }
     }
 
     private companion object {
+        const val LOG_TAG = "SettingsViewModel"
         val AVATAR_REGEX = Regex("<avatarFull><!\\[CDATA\\[(.*?)]]></avatarFull>")
+        val DATE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter
+            .ofPattern("yyyy-MM-dd HH:mm", Locale.CHINA)
+            .withZone(ZoneId.systemDefault())
+    }
+
+    private fun refreshSupportLogs() {
+        viewModelScope.launch {
+            val current = supportLogsState.value
+            supportLogsState.value = withContext(Dispatchers.IO) {
+                buildSupportLogState(isExporting = current.isExporting)
+            }
+        }
+    }
+
+    private fun buildSupportLogState(isExporting: Boolean): SupportLogUiState {
+        val summary = AppLog.summary()
+        val summaryText = when {
+            summary.hasLogs -> buildString {
+                append("当前已记录 ${summary.runtimeLogCount} 份运行日志")
+                if (summary.crashLogCount > 0) {
+                    append("、${summary.crashLogCount} 份崩溃日志")
+                }
+                append("，共 ${formatBytes(summary.totalBytes)}。")
+            }
+            else -> "当前还没有可导出的日志文件。"
+        }
+        return SupportLogUiState(
+            runtimeLogCount = summary.runtimeLogCount,
+            crashLogCount = summary.crashLogCount,
+            totalSizeLabel = formatBytes(summary.totalBytes),
+            summary = summaryText,
+            latestCrashLabel = summary.latestCrashAtMillis?.let { millis ->
+                "最近一次崩溃日志生成于 ${DATE_TIME_FORMATTER.format(Instant.ofEpochMilli(millis))}"
+            },
+            retentionSummary = AppLog.retentionPolicySummary(),
+            exportFileName = supportLogExportFileName(),
+            isExporting = isExporting,
+        )
     }
 }
 
 private data class MaintenanceUiState(
     val summary: String? = null,
 )
+
+private fun supportLogExportFileName(nowMillis: Long = System.currentTimeMillis()): String {
+    return "workshop-native-logs-" + DateTimeFormatter
+        .ofPattern("yyyyMMdd-HHmmss", Locale.US)
+        .withZone(ZoneId.systemDefault())
+        .format(Instant.ofEpochMilli(nowMillis)) + ".zip"
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val kb = 1024.0
+    val mb = kb * 1024.0
+    return when {
+        bytes >= mb -> String.format(Locale.US, "%.1f MB", bytes / mb)
+        bytes >= kb -> String.format(Locale.US, "%.1f KB", bytes / kb)
+        else -> "$bytes B"
+    }
+}

@@ -71,6 +71,7 @@ import com.slay.workshopnative.ui.feature.explore.ExploreScreen
 import com.slay.workshopnative.ui.feature.library.LibraryScreen
 import com.slay.workshopnative.ui.feature.login.LoginScreen
 import com.slay.workshopnative.ui.feature.settings.SettingsScreen
+import com.slay.workshopnative.ui.feature.workshop.WorkshopLaunchMode
 import com.slay.workshopnative.ui.feature.workshop.WorkshopScreen
 import kotlinx.coroutines.flow.collectLatest
 
@@ -132,6 +133,7 @@ fun WorkshopNativeRoot(
     var currentRootTabRoute by rememberSaveable { mutableStateOf(RootTab.Explore.route) }
     var activeWorkshopAppId by rememberSaveable { mutableStateOf<Int?>(null) }
     var activeWorkshopAppName by rememberSaveable { mutableStateOf("") }
+    var activeWorkshopMode by rememberSaveable { mutableStateOf(WorkshopLaunchMode.Browse.name) }
     val openExternalUrl: (String) -> Unit = { url ->
         if (!context.openUrlWithChooser(url, chooserTitle = "选择浏览器")) {
             Toast.makeText(context, "未找到可打开链接的浏览器", Toast.LENGTH_SHORT).show()
@@ -255,7 +257,11 @@ fun WorkshopNativeRoot(
 
     val currentRootTab = RootTab.entries.firstOrNull { it.route == currentRootTabRoute } ?: RootTab.Explore
     val activeWorkshop = activeWorkshopAppId?.let { appId ->
-        appId to activeWorkshopAppName
+        Triple(
+            appId,
+            activeWorkshopAppName,
+            WorkshopLaunchMode.entries.firstOrNull { it.name == activeWorkshopMode } ?: WorkshopLaunchMode.Browse,
+        )
     }
     val showBottomBar = activeWorkshop == null
     val showSessionBanner = showApplicationShell && !guestMode && sessionState.status == SessionStatus.Error
@@ -267,6 +273,7 @@ fun WorkshopNativeRoot(
     BackHandler(enabled = activeWorkshop != null) {
         activeWorkshopAppId = null
         activeWorkshopAppName = ""
+        activeWorkshopMode = WorkshopLaunchMode.Browse.name
     }
 
     WorkshopBackdrop {
@@ -294,15 +301,18 @@ fun WorkshopNativeRoot(
                     WorkshopScreen(
                         appId = activeWorkshop.first,
                         appName = activeWorkshop.second,
+                        launchMode = activeWorkshop.third,
                         paddingValues = shellPadding,
                         onBack = {
                             activeWorkshopAppId = null
                             activeWorkshopAppName = ""
+                            activeWorkshopMode = WorkshopLaunchMode.Browse.name
                         },
                         onOpenDownloads = {
                             currentRootTabRoute = RootTab.Downloads.route
                             activeWorkshopAppId = null
                             activeWorkshopAppName = ""
+                            activeWorkshopMode = WorkshopLaunchMode.Browse.name
                         },
                     )
                 } else {
@@ -313,6 +323,7 @@ fun WorkshopNativeRoot(
                                 onOpenGame = { appId, name ->
                                     activeWorkshopAppId = appId
                                     activeWorkshopAppName = name
+                                    activeWorkshopMode = WorkshopLaunchMode.Browse.name
                                 },
                             )
                         }
@@ -338,6 +349,12 @@ fun WorkshopNativeRoot(
                                     onOpenGame = { appId, name ->
                                         activeWorkshopAppId = appId
                                         activeWorkshopAppName = name
+                                        activeWorkshopMode = WorkshopLaunchMode.Browse.name
+                                    },
+                                    onOpenSubscriptions = { appId, name ->
+                                        activeWorkshopAppId = appId
+                                        activeWorkshopAppName = name
+                                        activeWorkshopMode = WorkshopLaunchMode.Subscriptions.name
                                     },
                                 )
                             }

@@ -127,6 +127,7 @@ dependencies {
     implementation(libs.protobuf.java)
     implementation(libs.spongycastle)
     implementation(libs.xz)
+    implementation("org.jsoup:jsoup:1.18.3")
     implementation("com.github.luben:zstd-jni:${libs.versions.zstd.get()}@aar")
 
     debugImplementation(libs.compose.ui.tooling)

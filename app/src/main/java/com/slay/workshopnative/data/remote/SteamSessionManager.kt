@@ -5,10 +5,10 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.provider.Settings
-import android.util.Log
 import androidx.annotation.WorkerThread
 import androidx.core.text.HtmlCompat
 import androidx.documentfile.provider.DocumentFile
+import com.slay.workshopnative.core.logging.AppLog as Log
 import com.slay.workshopnative.core.storage.createMediaStoreFileOutput
 import com.slay.workshopnative.core.storage.createMediaStoreFileUri
 import com.slay.workshopnative.core.storage.copyLocalFileToUri
@@ -145,6 +145,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
+import org.jsoup.Jsoup
 
 @Singleton
 class SteamSessionManager @Inject constructor(
@@ -160,6 +161,7 @@ class SteamSessionManager @Inject constructor(
         private const val OWNED_GAMES_SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000L
         private const val WORKSHOP_DEPOT_ID_CACHE_MS = 24 * 60 * 60 * 1000L
         private const val WORKSHOP_BROWSE_CACHE_MS = 45_000L
+        private const val WORKSHOP_SUBSCRIPTIONS_CACHE_MS = 45_000L
         private const val WORKSHOP_ITEM_CACHE_MS = 10 * 60 * 1000L
         private const val WORKSHOP_CONTENT_ACCESS_CACHE_MS = 5 * 60 * 1000L
         private const val WORKSHOP_GAME_DISCOVERY_CACHE_MS = 45_000L
@@ -183,6 +185,7 @@ class SteamSessionManager @Inject constructor(
         private const val WORKSHOP_EXPLORE_PAGE_SIZE = 8
         private const val STEAM_STORE_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
         private const val STEAM_PUBLISHED_FILE_DETAILS_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+        private const val WORKSHOP_USER_FILES_TYPE_SUBSCRIPTIONS = "mysubscriptions"
         private const val LOCAL_ROOT_REF_PREFIX = "local:"
         private const val TREE_ROOT_REF_PREFIX = "tree:"
         private const val DOWNLOADS_ROOT_REF_PREFIX = "downloads:"
@@ -280,6 +283,11 @@ class SteamSessionManager @Inject constructor(
         val depotId: Int,
         val manifestId: Long,
         val steamId64: Long?,
+    )
+
+    private data class WorkshopDetailPageContent(
+        val title: String = "",
+        val description: String = "",
     )
 
     private class AuthSessionInterruptedException(
@@ -422,6 +430,7 @@ class SteamSessionManager @Inject constructor(
     private var ownedGamesCache: CachedValue<List<OwnedGame>>? = null
     private val workshopDepotIdCache = ConcurrentHashMap<Int, CachedValue<Int>>()
     private val workshopBrowsePageCache = ConcurrentHashMap<String, CachedValue<WorkshopBrowsePage>>()
+    private val workshopSubscriptionsPageCache = ConcurrentHashMap<String, CachedValue<WorkshopBrowsePage>>()
     private val workshopGamePageCache = ConcurrentHashMap<Int, CachedValue<WorkshopGamePage>>()
     private val workshopGameSearchCache = ConcurrentHashMap<String, CachedValue<List<WorkshopGameEntry>>>()
     private val workshopItemCache = ConcurrentHashMap<Long, CachedValue<WorkshopItem>>()
@@ -913,6 +922,71 @@ class SteamSessionManager @Inject constructor(
     }
 
     @WorkerThread
+    suspend fun loadSubscribedWorkshopPage(
+        appId: Int,
+        page: Int,
+        pageSize: Int,
+        forceRefresh: Boolean = false,
+    ): WorkshopBrowsePage = withContext(Dispatchers.IO) {
+        Log.d(LOG_TAG, "loadSubscribedWorkshopPage appId=$appId page=$page pageSize=$pageSize")
+        ensureAuthenticated()
+        val steamId64 = currentSteamId64()
+        val normalizedPage = page.coerceAtLeast(1)
+        val normalizedPageSize = WorkshopBrowseQuery.normalizePageSize(pageSize)
+        val cacheKey = workshopSubscriptionsCacheKey(
+            steamId64 = steamId64,
+            appId = appId,
+            page = normalizedPage,
+            pageSize = normalizedPageSize,
+        )
+        if (!forceRefresh) {
+            workshopSubscriptionsPageCache[cacheKey]
+                ?.takeIf { it.isFresh(WORKSHOP_SUBSCRIPTIONS_CACHE_MS) }
+                ?.let { cached ->
+                    Log.d(LOG_TAG, "loadSubscribedWorkshopPage hit cache appId=$appId page=$normalizedPage")
+                    return@withContext cached.value
+                }
+        }
+
+        val request = SteammessagesPublishedfileSteamclient.CPublishedFile_GetUserFiles_Request.newBuilder().apply {
+            steamid = steamId64
+            this.appid = appId
+            this.page = normalizedPage
+            numperpage = normalizedPageSize
+            type = WORKSHOP_USER_FILES_TYPE_SUBSCRIPTIONS
+            sortmethod = "lastupdated"
+            setReturnTags(true)
+            setReturnPreviews(true)
+            setReturnChildren(true)
+            setReturnShortDescription(true)
+        }.build()
+
+        val response = publishedFileService?.getUserFiles(request)?.await()
+            ?: error("Steam workshop service unavailable")
+        val details = response.body.publishedfiledetailsList
+            .filter { it.result == EResult.OK.code() }
+        val totalCount = if (response.body.hasTotal()) response.body.total else details.size
+        val parsed = WorkshopBrowsePage(
+            items = details.map(::mapPublishedFileDetails),
+            totalCount = totalCount,
+            page = normalizedPage,
+            hasMore = normalizedPage * normalizedPageSize < totalCount,
+            sectionOptions = listOf(
+                WorkshopBrowseSectionOption(
+                    key = WorkshopBrowseQuery.SECTION_MY_SUBSCRIPTIONS,
+                    label = "我的订阅",
+                ),
+            ),
+            sortOptions = emptyList(),
+            periodOptions = emptyList(),
+            tagGroups = emptyList(),
+            supportsIncompatibleFilter = false,
+        )
+        workshopSubscriptionsPageCache[cacheKey] = CachedValue(parsed)
+        parsed
+    }
+
+    @WorkerThread
     suspend fun resolveWorkshopItem(publishedFileId: Long): WorkshopItem = withContext(Dispatchers.IO) {
         Log.d(LOG_TAG, "resolveWorkshopItem publishedFileId=$publishedFileId")
         resolveWorkshopItems(listOf(publishedFileId)).firstOrNull()
@@ -945,6 +1019,32 @@ class SteamSessionManager @Inject constructor(
                     .forEach { item ->
                         workshopItemCache[item.publishedFileId] = CachedValue(item)
                     }
+            }
+
+            if (normalizedIds.size <= 6) {
+                val itemsNeedingDetailPageFallback = missingIds.mapNotNull { publishedFileId ->
+                    workshopItemCache[publishedFileId]
+                        ?.takeIf { it.isFresh(WORKSHOP_ITEM_CACHE_MS) }
+                        ?.value
+                }.filter { item -> item.needsWorkshopDetailPageFallback() }
+
+                if (itemsNeedingDetailPageFallback.isNotEmpty()) {
+                    supervisorScope {
+                        itemsNeedingDetailPageFallback
+                            .map { item ->
+                                async {
+                                    loadWorkshopDetailPageContent(item)?.let { detailPage ->
+                                        item.mergeWorkshopDetailPage(detailPage)
+                                    }
+                                }
+                            }
+                            .forEach { deferred ->
+                                deferred.await()?.let { item ->
+                                    workshopItemCache[item.publishedFileId] = CachedValue(item)
+                                }
+                            }
+                    }
+                }
             }
         }
 
@@ -3532,6 +3632,15 @@ class SteamSessionManager @Inject constructor(
         return buildWorkshopBrowseUrl(appId, query).toString()
     }
 
+    private fun workshopSubscriptionsCacheKey(
+        steamId64: Long,
+        appId: Int,
+        page: Int,
+        pageSize: Int,
+    ): String {
+        return "subscriptions:$steamId64:$appId:$page:$pageSize"
+    }
+
     private fun parseWorkshopBrowsePage(
         appId: Int,
         query: WorkshopBrowseQuery,
@@ -3673,6 +3782,7 @@ class SteamSessionManager @Inject constructor(
 
     private fun currentSectionLabel(sectionKey: String): String {
         return when (sectionKey) {
+            WorkshopBrowseQuery.SECTION_MY_SUBSCRIPTIONS -> "我的订阅"
             WorkshopBrowseQuery.SECTION_ITEMS -> "条目"
             "collections" -> "合集"
             else -> sectionKey
@@ -3754,11 +3864,24 @@ class SteamSessionManager @Inject constructor(
             .trim()
     }
 
+    private fun htmlToDisplayText(value: String): String {
+        val normalized = value
+            .replace(Regex("(?i)<br\\s*/?>"), "\n")
+            .replace(Regex("(?i)</(div|p|h[1-6]|li)>"), "\n")
+            .replace(Regex("(?i)<li[^>]*>"), "• ")
+        return decodeHtml(normalized)
+            .replace(Regex("[\\t\\x0B\\f\\r ]+"), " ")
+            .replace(Regex(" *\n *"), "\n")
+            .replace(Regex("\n{3,}"), "\n\n")
+            .trim()
+    }
+
     private fun clearSessionCaches(clearAnonymousContentAccess: Boolean = false) {
         ownedGamesCacheSteamId64 = 0L
         ownedGamesCache = null
         workshopItemCache.clear()
         workshopBrowsePageCache.clear()
+        workshopSubscriptionsPageCache.clear()
         workshopGamePageCache.clear()
         workshopGameSearchCache.clear()
         if (clearAnonymousContentAccess) {
@@ -3802,6 +3925,74 @@ class SteamSessionManager @Inject constructor(
         return decodeHtml(value)
             .replace(Regex("\\s+"), " ")
             .trim()
+    }
+
+    private fun WorkshopItem.needsWorkshopDetailPageFallback(): Boolean {
+        return description.isBlank() || title.isBlank() || title.startsWith("Workshop #")
+    }
+
+    private fun WorkshopItem.mergeWorkshopDetailPage(
+        detailPage: WorkshopDetailPageContent,
+    ): WorkshopItem {
+        val mergedDescription = when {
+            detailPage.description.isBlank() -> description
+            description.isBlank() -> detailPage.description
+            detailPage.description.length >= description.length -> detailPage.description
+            else -> description
+        }
+        val mergedShortDescription = when {
+            shortDescription.isNotBlank() -> shortDescription
+            mergedDescription.isBlank() -> shortDescription
+            else -> mergedDescription.lineSequence().firstOrNull().orEmpty()
+        }
+        return copy(
+            title = detailPage.title.ifBlank { title },
+            shortDescription = mergedShortDescription,
+            description = mergedDescription,
+        )
+    }
+
+    private suspend fun loadWorkshopDetailPageContent(
+        item: WorkshopItem,
+    ): WorkshopDetailPageContent? = withContext(Dispatchers.IO) {
+        val detailUrl = (item.detailUrl
+            ?: "https://steamcommunity.com/sharedfiles/filedetails/?id=${item.publishedFileId}")
+            .toHttpUrl()
+            .newBuilder()
+            .setQueryParameter("id", item.publishedFileId.toString())
+            .setQueryParameter("l", "schinese")
+            .build()
+        val request = Request.Builder()
+            .url(detailUrl)
+            .header("User-Agent", "Mozilla/5.0")
+            .get()
+            .build()
+        runCatching {
+            val html = okHttpClient.newCall(request).execute().use { response ->
+                check(response.isSuccessful) {
+                    "Steam workshop detail page failed: HTTP ${response.code}"
+                }
+                response.body?.string().orEmpty()
+            }
+            val document = Jsoup.parse(html)
+            val title = document.selectFirst("div.workshopItemTitle")
+                ?.text()
+                .orEmpty()
+            val description = document.selectFirst("div.workshopItemDescription#highlightContent")
+                ?.html()
+                ?.let(::htmlToDisplayText)
+                .orEmpty()
+            WorkshopDetailPageContent(
+                title = title,
+                description = description,
+            ).takeIf { it.title.isNotBlank() || it.description.isNotBlank() }
+        }.onFailure { throwable ->
+            Log.w(
+                LOG_TAG,
+                "loadWorkshopDetailPageContent failed publishedFileId=${item.publishedFileId}",
+                throwable,
+            )
+        }.getOrNull()
     }
 
     private fun extractPackageAppIds(packageInfo: PICSProductInfo): Set<Int> {

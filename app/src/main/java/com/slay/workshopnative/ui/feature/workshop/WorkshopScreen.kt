@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardActions
@@ -43,6 +44,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -79,6 +81,7 @@ import com.slay.workshopnative.data.model.WorkshopBrowseSortOption
 import com.slay.workshopnative.data.model.WorkshopBrowseTagGroup
 import com.slay.workshopnative.data.model.WorkshopItem
 import com.slay.workshopnative.ui.components.ArtworkThumbnail
+import com.slay.workshopnative.ui.components.ExpandableBodyText
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -86,6 +89,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 fun WorkshopScreen(
     appId: Int,
     appName: String,
+    launchMode: WorkshopLaunchMode,
     paddingValues: PaddingValues,
     onBack: () -> Unit,
     onOpenDownloads: () -> Unit,
@@ -99,7 +103,8 @@ fun WorkshopScreen(
     var showSectionPicker by rememberSaveable { mutableStateOf(false) }
     var showSortPicker by rememberSaveable { mutableStateOf(false) }
     var showPeriodPicker by rememberSaveable { mutableStateOf(false) }
-    var searchText by rememberSaveable(appId) { mutableStateOf("") }
+    var searchText by rememberSaveable(appId, launchMode.name) { mutableStateOf("") }
+    val isSubscriptionMode = state.launchMode == WorkshopLaunchMode.Subscriptions
 
     LaunchedEffect(state.query.searchText) {
         if (searchText != state.query.searchText) {
@@ -107,8 +112,8 @@ fun WorkshopScreen(
         }
     }
 
-    LaunchedEffect(appId, appName) {
-        viewModel.bindApp(appId, appName)
+    LaunchedEffect(appId, appName, launchMode) {
+        viewModel.bindApp(appId, appName, launchMode)
     }
 
     LaunchedEffect(state.errorMessage) {
@@ -154,16 +159,18 @@ fun WorkshopScreen(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            WorkshopTopBar(
+            WorkshopTopBarModern(
                 appName = state.appName,
                 totalCount = state.totalCount,
                 hasLoadedOnce = state.hasLoadedOnce,
+                launchMode = state.launchMode,
                 onBack = onBack,
                 onRefresh = viewModel::refresh,
                 onOpenFilters = { showFilters = true },
                 onOpenSectionPicker = { showSectionPicker = true },
                 onOpenSortPicker = { showSortPicker = true },
                 onOpenPeriodPicker = { showPeriodPicker = true },
+                onSwitchToBrowse = viewModel::switchToBrowseMode,
                 isRefreshing = state.isRefreshing,
                 query = state.query,
                 activeTagCount = state.query.requiredTags.size + state.query.excludedTags.size,
@@ -191,15 +198,44 @@ fun WorkshopScreen(
                     appName = state.appName,
                 )
             } else if (state.items.isEmpty()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    shape = RoundedCornerShape(24.dp),
-                ) {
-                    Text(
-                        text = "当前筛选条件下没有可显示的创意工坊条目。",
-                        modifier = Modifier.padding(18.dp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                if (isSubscriptionMode) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shape = RoundedCornerShape(24.dp),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Text(
+                                text = "你还没有订阅这个游戏的创意工坊内容。",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "这里不会修改你的订阅状态，只会读取当前账号已经订阅的条目。",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Button(
+                                onClick = viewModel::switchToBrowseMode,
+                                shape = RoundedCornerShape(18.dp),
+                            ) {
+                                Text("浏览全部工坊")
+                            }
+                        }
+                    }
+                } else {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shape = RoundedCornerShape(24.dp),
+                    ) {
+                        Text(
+                            text = "当前筛选条件下没有可显示的创意工坊条目。",
+                            modifier = Modifier.padding(18.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             } else {
                 LazyColumn(
@@ -247,7 +283,7 @@ fun WorkshopScreen(
         )
     }
 
-    if (showFilters) {
+    if (!isSubscriptionMode && showFilters) {
         FilterSheet(
             currentQuery = state.query,
             tagGroups = state.tagGroups,
@@ -279,7 +315,7 @@ fun WorkshopScreen(
             ?: fallbackPeriodOptions(state.query.periodDays)
     }
 
-    if (showSectionPicker) {
+    if (!isSubscriptionMode && showSectionPicker) {
         QuickChoiceSheet(
             title = "内容区",
             subtitle = "切换当前浏览的 Workshop 内容分类",
@@ -293,7 +329,7 @@ fun WorkshopScreen(
         )
     }
 
-    if (showSortPicker) {
+    if (!isSubscriptionMode && showSortPicker) {
         QuickChoiceSheet(
             title = "排序",
             subtitle = "选择列表结果的排列方式",
@@ -318,7 +354,7 @@ fun WorkshopScreen(
         )
     }
 
-    if (showPeriodPicker) {
+    if (!isSubscriptionMode && showPeriodPicker) {
         QuickChoiceSheet(
             title = "时间范围",
             subtitle = "只对支持趋势排序的方式生效",
@@ -396,10 +432,11 @@ private fun WorkshopLoadingCard(
 }
 
 @Composable
-private fun WorkshopTopBar(
+private fun WorkshopTopBarModern(
     appName: String,
     totalCount: Int,
     hasLoadedOnce: Boolean,
+    launchMode: WorkshopLaunchMode,
     isRefreshing: Boolean,
     query: WorkshopBrowseQuery,
     activeTagCount: Int,
@@ -410,145 +447,271 @@ private fun WorkshopTopBar(
     onOpenSectionPicker: () -> Unit,
     onOpenSortPicker: () -> Unit,
     onOpenPeriodPicker: () -> Unit,
+    onSwitchToBrowse: () -> Unit,
     onSearchTextChange: (String) -> Unit,
     onSubmitSearch: () -> Unit,
     onClearSearch: () -> Unit,
 ) {
     val advancedFilterCount = activeTagCount + if (query.showIncompatible) 1 else 0
     val supportsPeriod = query.sortKey == WorkshopBrowseQuery.SORT_TREND
+    val isSubscriptionMode = launchMode == WorkshopLaunchMode.Subscriptions
     val isInitialSync = !hasLoadedOnce
-    val subtitle = if (isInitialSync) "正在同步创意工坊条目" else "创意工坊 $totalCount 项"
+    val headerEyebrow = if (isSubscriptionMode) "我的订阅" else "创意工坊"
+    val headerMeta = buildList {
+        if (!isInitialSync) {
+            add(if (isSubscriptionMode) "已订阅 $totalCount 项" else "$totalCount 个条目")
+        }
+        if (!isSubscriptionMode) {
+            if (query.sectionKey != WorkshopBrowseQuery.SECTION_ITEMS) {
+                add(sectionLabel(query.sectionKey))
+            }
+            add(sortLabel(query.sortKey))
+            if (supportsPeriod) {
+                add(periodLabel(query.periodDays))
+            }
+        }
+    }.joinToString(" · ")
+    val statusMessage = if (isRefreshing || isInitialSync) {
+        if (isSubscriptionMode) "正在同步你的订阅条目" else "正在同步工坊内容"
+    } else {
+        null
+    }
+    val headerDescription = if (isSubscriptionMode) {
+        "只读取当前账号已订阅的条目，不会执行任何订阅变更。"
+    } else {
+        ""
+    }
+
     Surface(
-        shape = RoundedCornerShape(28.dp),
-        color = Color.White.copy(alpha = 0.82f),
+        shape = RoundedCornerShape(30.dp),
+        color = Color(0xFFF7F1EA).copy(alpha = 0.96f),
         tonalElevation = 2.dp,
         shadowElevation = 8.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.White.copy(alpha = 0.82f),
+                            Color(0xFFFFF7EF).copy(alpha = 0.64f),
+                            Color(0xFFF2E5D7).copy(alpha = 0.38f),
+                        ),
+                    ),
+                )
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
+                CompactActionButton(
+                    onClick = onBack,
+                    icon = {
+                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
+                    },
+                )
+                Column(
                     modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    CompactActionButton(
-                        onClick = onBack,
-                        icon = {
-                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
-                        },
+                    Text(
+                        text = headerEyebrow,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFB36B42),
                     )
-                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(
+                        text = appName,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (headerMeta.isNotBlank()) {
                         Text(
-                            text = appName,
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
+                            text = headerMeta,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                    }
+                    if (statusMessage != null) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(Color(0xFFE28954), CircleShape),
+                            )
+                            Text(
+                                text = statusMessage,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFF9A5B38),
+                            )
+                        }
+                    } else if (isSubscriptionMode) {
                         Text(
-                            text = subtitle,
+                            text = headerDescription,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CompactActionButton(
-                        onClick = onRefresh,
-                        enabled = !isRefreshing,
-                        icon = {
-                            if (isRefreshing || isInitialSync) {
-                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.3.dp)
-                            } else {
-                                Icon(Icons.Rounded.Refresh, contentDescription = "刷新")
-                            }
-                        },
-                    )
-                }
+                CompactActionButton(
+                    onClick = onRefresh,
+                    enabled = !isRefreshing,
+                    icon = {
+                        if (isRefreshing || isInitialSync) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.3.dp)
+                        } else {
+                            Icon(Icons.Rounded.Refresh, contentDescription = "刷新")
+                        }
+                    },
+                )
             }
 
-            OutlinedTextField(
-                value = searchText,
-                onValueChange = onSearchTextChange,
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                placeholder = { Text("搜索创意工坊条目") },
-                leadingIcon = {
-                    Icon(Icons.Rounded.Search, contentDescription = null)
-                },
-                trailingIcon = {
-                    if (searchText.isNotBlank()) {
-                        IconButton(onClick = onClearSearch) {
-                            Icon(Icons.Rounded.Close, contentDescription = "清空搜索")
-                        }
-                    }
-                },
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { onSubmitSearch() }),
-                shape = RoundedCornerShape(20.dp),
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(Color.White.copy(alpha = 0.64f)),
             )
 
-            Row(
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                QuickFilterChip(
-                    label = sectionLabel(query.sectionKey),
-                    onClick = onOpenSectionPicker,
+            if (!isSubscriptionMode) {
+                OutlinedTextField(
+                    value = searchText,
+                    onValueChange = onSearchTextChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    placeholder = { Text("搜索创意工坊条目") },
+                    leadingIcon = {
+                        Icon(Icons.Rounded.Search, contentDescription = null)
+                    },
+                    trailingIcon = {
+                        if (searchText.isNotBlank()) {
+                            IconButton(onClick = onClearSearch) {
+                                Icon(Icons.Rounded.Close, contentDescription = "清空搜索")
+                            }
+                        }
+                    },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { onSubmitSearch() }),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = Color.White.copy(alpha = 0.72f),
+                        unfocusedContainerColor = Color.White.copy(alpha = 0.58f),
+                        disabledContainerColor = Color.White.copy(alpha = 0.48f),
+                        focusedBorderColor = Color(0xFFE69A69),
+                        unfocusedBorderColor = Color.White.copy(alpha = 0.34f),
+                        focusedLeadingIconColor = Color(0xFFE96D43),
+                        unfocusedLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        cursorColor = Color(0xFFE96D43),
+                    ),
                 )
-                QuickFilterChip(
-                    label = sortLabel(query.sortKey),
-                    onClick = onOpenSortPicker,
-                )
-                if (supportsPeriod) {
-                    QuickFilterChip(
-                        label = periodLabel(query.periodDays),
-                        onClick = onOpenPeriodPicker,
-                    )
-                }
-                QuickFilterChip(
-                    label = if (advancedFilterCount > 0) "高级筛选 $advancedFilterCount" else "高级筛选",
-                    onClick = onOpenFilters,
-                    highlighted = advancedFilterCount > 0,
-                    icon = { Icon(Icons.Rounded.FilterAlt, contentDescription = null) },
-                )
-            }
 
-            if (advancedFilterCount > 0 || query.searchText.isNotBlank()) {
                 Row(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (query.searchText.isNotBlank()) {
-                        InfoPill(
-                            text = "搜索 ${query.searchText}",
-                            containerColor = MaterialTheme.colorScheme.primaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    QuickFilterChip(
+                        label = sectionLabel(query.sectionKey),
+                        onClick = onOpenSectionPicker,
+                    )
+                    QuickFilterChip(
+                        label = sortLabel(query.sortKey),
+                        onClick = onOpenSortPicker,
+                    )
+                    if (supportsPeriod) {
+                        QuickFilterChip(
+                            label = periodLabel(query.periodDays),
+                            onClick = onOpenPeriodPicker,
                         )
                     }
-                    if (query.requiredTags.isNotEmpty()) {
-                        InfoPill(text = "包含 ${query.requiredTags.size}")
+                    QuickFilterChip(
+                        label = if (advancedFilterCount > 0) "高级筛选 $advancedFilterCount" else "高级筛选",
+                        onClick = onOpenFilters,
+                        highlighted = advancedFilterCount > 0,
+                        icon = { Icon(Icons.Rounded.FilterAlt, contentDescription = null) },
+                    )
+                }
+
+                if (advancedFilterCount > 0 || query.searchText.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        if (query.searchText.isNotBlank()) {
+                            InfoPill(
+                                text = "搜索 ${query.searchText}",
+                                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        }
+                        if (query.requiredTags.isNotEmpty()) {
+                            InfoPill(text = "包含 ${query.requiredTags.size}")
+                        }
+                        if (query.excludedTags.isNotEmpty()) {
+                            InfoPill(
+                                text = "排除 ${query.excludedTags.size}",
+                                containerColor = MaterialTheme.colorScheme.errorContainer,
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                            )
+                        }
+                        if (query.showIncompatible) {
+                            InfoPill(text = "含不兼容")
+                        }
                     }
-                    if (query.excludedTags.isNotEmpty()) {
-                        InfoPill(
-                            text = "排除 ${query.excludedTags.size}",
-                            containerColor = MaterialTheme.colorScheme.errorContainer,
-                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                        )
-                    }
-                    if (query.showIncompatible) {
-                        InfoPill(text = "含不兼容")
+                }
+
+                if (headerDescription.isNotBlank()) {
+                    Text(
+                        text = headerDescription,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                Surface(
+                    color = Color.White.copy(alpha = 0.62f),
+                    shape = RoundedCornerShape(22.dp),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = "我的订阅",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = "这里只读取当前账号已订阅的条目，不会执行任何订阅变更。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = onSwitchToBrowse,
+                            shape = RoundedCornerShape(18.dp),
+                        ) {
+                            Text("浏览全部工坊")
+                        }
                     }
                 }
             }
@@ -565,7 +728,9 @@ private fun CompactActionButton(
     Surface(
         modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        color = Color.White.copy(alpha = 0.68f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.44f)),
+        shadowElevation = 2.dp,
     ) {
         Box(
             modifier = Modifier.padding(horizontal = 11.dp, vertical = 10.dp),
@@ -982,12 +1147,11 @@ private fun WorkshopDetailSheet(
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    Text(
+                    ExpandableBodyText(
                         text = item.description.ifBlank {
                             item.shortDescription.ifBlank { "这个条目没有提供额外介绍。" }
                         },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        collapsedMaxLines = 6,
                     )
                 }
             }
@@ -1692,6 +1856,7 @@ private fun WorkshopItem.downloadModeLabel(autoResolveEnabled: Boolean): String 
 
 private fun sectionLabel(sectionKey: String): String {
     return when (sectionKey) {
+        WorkshopBrowseQuery.SECTION_MY_SUBSCRIPTIONS -> "我的订阅"
         WorkshopBrowseQuery.SECTION_ITEMS -> "条目"
         "collections" -> "合集"
         else -> sectionKey

@@ -5,6 +5,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.core.storage.buildDownloadDestinationLabel
 import com.slay.workshopnative.core.util.sanitizeFileName
 import com.slay.workshopnative.data.local.DownloadAuthMode
@@ -29,6 +30,9 @@ class DownloadsRepositoryImpl @Inject constructor(
     private val preferencesStore: UserPreferencesStore,
     private val steamRepository: SteamRepository,
 ) : DownloadsRepository {
+    companion object {
+        private const val LOG_TAG = "DownloadsRepository"
+    }
 
     private data class DownloadBinding(
         val authMode: DownloadAuthMode,
@@ -39,6 +43,10 @@ class DownloadsRepositoryImpl @Inject constructor(
     override val downloads: Flow<List<DownloadTaskEntity>> = downloadTaskDao.observeAll()
 
     override suspend fun enqueue(item: WorkshopItem): Result<Unit> {
+        AppLog.i(
+            LOG_TAG,
+            "enqueue requested publishedFileId=${item.publishedFileId} appId=${item.appId} canDownload=${item.canDownload}",
+        )
         if (!item.canDownload && item.hasChildItems) {
             item.childPublishedFileIds
                 .distinct()
@@ -51,6 +59,10 @@ class DownloadsRepositoryImpl @Inject constructor(
         }
 
         if (!item.canDownload) {
+            AppLog.w(
+                LOG_TAG,
+                "enqueue rejected because item is unavailable publishedFileId=${item.publishedFileId}",
+            )
             val now = System.currentTimeMillis()
             downloadTaskDao.upsert(
                 DownloadTaskEntity(
@@ -161,6 +173,10 @@ class DownloadsRepositoryImpl @Inject constructor(
                 boundSteamId64 = boundSteamId64,
             ),
         )
+        AppLog.i(
+            LOG_TAG,
+            "enqueue scheduled taskId=$taskId publishedFileId=${item.publishedFileId} authMode=$authMode",
+        )
         return Result.success(Unit)
     }
 
@@ -253,6 +269,7 @@ class DownloadsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun cancel(taskId: String) {
+        AppLog.i(LOG_TAG, "cancel requested taskId=$taskId")
         workManager.cancelUniqueWork(taskId)
         val existing = downloadTaskDao.getById(taskId) ?: return
         downloadTaskDao.finish(
@@ -279,6 +296,7 @@ class DownloadsRepositoryImpl @Inject constructor(
         }
         workManager.cancelUniqueWork(taskId)
         downloadTaskDao.deleteById(taskId)
+        AppLog.i(LOG_TAG, "delete completed taskId=$taskId status=${existing.status}")
         Result.success(Unit)
     }
 
@@ -385,6 +403,10 @@ class DownloadsRepositoryImpl @Inject constructor(
         task: DownloadTaskEntity,
         message: String,
     ) {
+        AppLog.w(
+            LOG_TAG,
+            "markTaskInterrupted taskId=${task.taskId} publishedFileId=${task.publishedFileId} message=$message",
+        )
         downloadTaskDao.finish(
             taskId = task.taskId,
             status = DownloadStatus.Failed,
@@ -502,6 +524,10 @@ class DownloadsRepositoryImpl @Inject constructor(
             publishedFileId = existing.publishedFileId,
             keepTaskId = existing.taskId,
         ).forEach { duplicate ->
+            AppLog.i(
+                LOG_TAG,
+                "removeDuplicateEntries removing taskId=${duplicate.taskId} publishedFileId=${duplicate.publishedFileId}",
+            )
             if (
                 duplicate.status == DownloadStatus.Queued ||
                 duplicate.status == DownloadStatus.Running ||
