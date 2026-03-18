@@ -1535,10 +1535,22 @@ class SteamSessionManager @Inject constructor(
         contentAccess: WorkshopContentAccess,
     ): List<CdnRoute> {
         var rank = 0
+        val eligibleServers = servers.asSequence()
+            .mapNotNull { server ->
+                val hostName = serverIdentity(server) ?: return@mapNotNull null
+                if (!CdnRoutePolicy.isServerAllowed(server.protocol.name, hostName)) {
+                    Log.i(
+                        LOG_TAG,
+                        "Skipping CDN route blocked by network security policy protocol=${server.protocol.name} host=$hostName",
+                    )
+                    return@mapNotNull null
+                }
+                server to hostName
+            }
+            .toList()
         return buildList {
             transportClients.forEach { transportClient ->
-                servers.take(MAX_CDN_ROUTES_PER_TRANSPORT).forEach { server ->
-                    val hostName = serverIdentity(server) ?: return@forEach
+                eligibleServers.take(MAX_CDN_ROUTES_PER_TRANSPORT).forEach { (server, hostName) ->
                     add(
                         CdnRoute(
                             rank = rank++,

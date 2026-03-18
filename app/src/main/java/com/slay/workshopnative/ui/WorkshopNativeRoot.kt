@@ -1,7 +1,6 @@
 package com.slay.workshopnative.ui
 
-import android.content.Intent
-import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.BorderStroke
@@ -65,6 +64,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.slay.workshopnative.data.preferences.SavedSteamAccount
 import com.slay.workshopnative.data.model.SessionStatus
 import com.slay.workshopnative.data.model.SteamSessionState
+import com.slay.workshopnative.core.util.openUrlWithChooser
 import com.slay.workshopnative.ui.components.WorkshopBackdrop
 import com.slay.workshopnative.ui.feature.downloads.DownloadsScreen
 import com.slay.workshopnative.ui.feature.explore.ExploreScreen
@@ -133,10 +133,8 @@ fun WorkshopNativeRoot(
     var activeWorkshopAppId by rememberSaveable { mutableStateOf<Int?>(null) }
     var activeWorkshopAppName by rememberSaveable { mutableStateOf("") }
     val openExternalUrl: (String) -> Unit = { url ->
-        runCatching {
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
+        if (!context.openUrlWithChooser(url, chooserTitle = "选择浏览器")) {
+            Toast.makeText(context, "未找到可打开链接的浏览器", Toast.LENGTH_SHORT).show()
         }
     }
 

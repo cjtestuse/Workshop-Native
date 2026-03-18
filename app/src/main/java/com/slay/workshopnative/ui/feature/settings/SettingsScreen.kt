@@ -2,6 +2,7 @@ package com.slay.workshopnative.ui.feature.settings
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -71,6 +72,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.slay.workshopnative.core.util.openUrlWithChooser
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
@@ -104,10 +106,8 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var activeDestination by remember { mutableStateOf<SettingsDestination?>(null) }
     val openExternalUrl: (String) -> Unit = { url ->
-        runCatching {
-            context.startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
+        if (!context.openUrlWithChooser(url, chooserTitle = "选择浏览器")) {
+            Toast.makeText(context, "未找到可打开链接的浏览器", Toast.LENGTH_SHORT).show()
         }
     }
 
