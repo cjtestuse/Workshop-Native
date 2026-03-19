@@ -77,7 +77,7 @@ import com.slay.workshopnative.core.util.openUrlWithChooser
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
-import com.slay.workshopnative.data.preferences.DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS
+import com.slay.workshopnative.data.preferences.DownloadPerformanceMode
 import com.slay.workshopnative.ui.AppNoticeItem
 import com.slay.workshopnative.ui.AppUpdateUiState
 import com.slay.workshopnative.ui.WorkshopNativeAbout
@@ -272,7 +272,7 @@ fun SettingsScreen(
                         iconTint = Color(0xFF2F7F73),
                         title = "下载策略",
                         summary = buildString {
-                            append("${uiState.downloadChunkConcurrency} 线程")
+                            append(uiState.downloadPerformanceMode.performanceLabel())
                             append(" · ")
                             append(
                                 when {
@@ -394,7 +394,7 @@ fun SettingsScreen(
 
                     SettingsDestination.DownloadStrategy -> DownloadStrategyContent(
                         uiState = uiState,
-                        onConcurrencySelect = viewModel::saveDownloadChunkConcurrency,
+                        onPerformanceModeSelect = viewModel::saveDownloadPerformanceMode,
                         onTogglePreferAnonymous = viewModel::savePreferAnonymousDownloads,
                         onToggleAllowAuthenticatedFallback = viewModel::saveAllowAuthenticatedDownloadFallback,
                         onCdnTransportSelect = viewModel::saveCdnTransportPreference,
@@ -1240,7 +1240,7 @@ private fun DownloadLocationContent(
 @Composable
 private fun DownloadStrategyContent(
     uiState: SettingsUiState,
-    onConcurrencySelect: (Int) -> Unit,
+    onPerformanceModeSelect: (DownloadPerformanceMode) -> Unit,
     onTogglePreferAnonymous: (Boolean) -> Unit,
     onToggleAllowAuthenticatedFallback: (Boolean) -> Unit,
     onCdnTransportSelect: (CdnTransportPreference) -> Unit,
@@ -1248,22 +1248,23 @@ private fun DownloadStrategyContent(
 ) {
     val allowLoggedInDownload = uiState.isLoginFeatureEnabled && uiState.isLoggedInDownloadEnabled
     SettingsSubsectionTitle(
-        title = "分块并发",
-        subtitle = "当前 ${uiState.downloadChunkConcurrency} 线程。下载时会按设备内存自动收紧，避免 OOM。",
+        title = "下载性能模式",
+        subtitle = "当前 ${uiState.downloadPerformanceMode.performanceLabel()}。目标并发 ${uiState.downloadChunkConcurrency} 路，运行时仍会按设备内存自动收紧。",
     )
 
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS.forEach { option ->
+        DownloadPerformanceMode.entries.forEach { option ->
             SettingsChoiceChip(
-                label = option.toString(),
-                selected = uiState.downloadChunkConcurrency == option,
-                onClick = { onConcurrencySelect(option) },
+                label = option.performanceLabel(),
+                selected = uiState.downloadPerformanceMode == option,
+                onClick = { onPerformanceModeSelect(option) },
             )
         }
     }
+    SettingsInlineHint(text = uiState.downloadPerformanceMode.performanceDescription())
 
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
@@ -1577,6 +1578,20 @@ private fun CdnTransportPreference.transportDescription(): String {
         CdnTransportPreference.Auto -> "自动根据上次成功路径和当前网络环境选择。通常适合大多数情况。"
         CdnTransportPreference.PreferSystem -> "优先沿用当前系统网络路径。适合浏览器或 Steam 客户端本来就稳定的情况。"
         CdnTransportPreference.PreferDirect -> "优先绕开系统代理直连 CDN。适合代理链路本身更慢或更不稳定的情况。"
+    }
+}
+
+private fun DownloadPerformanceMode.performanceLabel(): String {
+    return when (this) {
+        DownloadPerformanceMode.Auto -> "自动高性能"
+        DownloadPerformanceMode.Compatibility -> "兼容模式"
+    }
+}
+
+private fun DownloadPerformanceMode.performanceDescription(): String {
+    return when (this) {
+        DownloadPerformanceMode.Auto -> "默认模式。会优先释放更高下载性能，但仍会按设备内存自动收紧，避免重新走回 OOM。"
+        DownloadPerformanceMode.Compatibility -> "更保守地限制分块并发和连接激进度。适合旧设备，或之前出现过内存溢出的情况。"
     }
 }
 

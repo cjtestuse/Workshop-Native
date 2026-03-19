@@ -11,9 +11,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -51,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -290,6 +293,8 @@ fun WorkshopNativeRoot(
             WorkshopLaunchMode.entries.firstOrNull { it.name == activeWorkshopMode } ?: WorkshopLaunchMode.Browse,
         )
     }
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
     val showBottomBar = activeWorkshop == null
     val showSessionBanner = showApplicationShell &&
         isLoginFeatureEnabled &&
@@ -300,7 +305,7 @@ fun WorkshopNativeRoot(
         else -> 76.dp
     }
 
-    BackHandler(enabled = activeWorkshop != null) {
+    BackHandler(enabled = activeWorkshop != null && !imeVisible) {
         activeWorkshopAppId = null
         activeWorkshopAppName = ""
         activeWorkshopMode = WorkshopLaunchMode.Browse.name

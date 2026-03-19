@@ -53,32 +53,34 @@ class DownloadsRepositoryImpl @Inject constructor(
             LOG_TAG,
             "enqueue requested publishedFileId=${item.publishedFileId} appId=${item.appId} canDownload=${item.canDownload}",
         )
-        if (!item.canDownload && item.hasChildItems) {
-            item.childPublishedFileIds
+        val preparedItem = prepareItemForDownload(item)
+
+        if (!preparedItem.canDownload && preparedItem.hasChildItems) {
+            preparedItem.childPublishedFileIds
                 .distinct()
                 .filter { it > 0L }
                 .forEach { publishedFileId ->
-                    val childItem = steamRepository.resolveWorkshopItem(publishedFileId).getOrThrow()
+                    val childItem = steamRepository.resolveWorkshopItemForDownload(publishedFileId).getOrThrow()
                     enqueue(childItem).getOrThrow()
                 }
             return Result.success(Unit)
         }
 
-        if (!item.canDownload) {
+        if (!preparedItem.canDownload) {
             AppLog.w(
                 LOG_TAG,
-                "enqueue rejected because item is unavailable publishedFileId=${item.publishedFileId}",
+                "enqueue rejected because item is unavailable publishedFileId=${preparedItem.publishedFileId}",
             )
             val now = System.currentTimeMillis()
             downloadTaskDao.upsert(
                 DownloadTaskEntity(
-                    taskId = "unavailable-${item.publishedFileId}",
-                    publishedFileId = item.publishedFileId,
-                    appId = item.appId,
-                    title = item.title,
-                    previewUrl = item.previewUrl,
-                    sourceUrl = item.fileUrl ?: "steam://publishedfile/${item.publishedFileId}",
-                    fileName = item.fileName ?: sanitizeFileName(item.title),
+                    taskId = "unavailable-${preparedItem.publishedFileId}",
+                    publishedFileId = preparedItem.publishedFileId,
+                    appId = preparedItem.appId,
+                    title = preparedItem.title,
+                    previewUrl = preparedItem.previewUrl,
+                    sourceUrl = preparedItem.fileUrl ?: "steam://publishedfile/${preparedItem.publishedFileId}",
+                    fileName = preparedItem.fileName ?: sanitizeFileName(preparedItem.title),
                     downloadFolderName = null,
                     targetTreeUri = null,
                     storageRootRef = null,
@@ -97,7 +99,7 @@ class DownloadsRepositoryImpl @Inject constructor(
                     pauseRequested = false,
                     progressPercent = 0,
                     bytesDownloaded = 0,
-                    totalBytes = item.fileSize,
+                    totalBytes = preparedItem.fileSize,
                     savedFileUri = null,
                     errorMessage = "该条目既没有公开直链，也没有可用的 Steam 内容 manifest",
                     createdAt = now,
@@ -107,11 +109,14 @@ class DownloadsRepositoryImpl @Inject constructor(
             return Result.failure(IllegalStateException("该条目当前不可下载"))
         }
 
-        cancelActiveDownloads(item.publishedFileId)
+        cancelActiveDownloads(preparedItem.publishedFileId)
 
         val prefs = preferencesStore.snapshot()
         val taskId = UUID.randomUUID().toString()
-        val fileName = sanitizeFileName(item.fileName ?: item.title, "workshop-${item.publishedFileId}")
+        val fileName = sanitizeFileName(
+            preparedItem.fileName ?: preparedItem.title,
+            "workshop-${preparedItem.publishedFileId}",
+        )
         val downloadFolderName = prefs.downloadFolderName
         val session = steamRepository.sessionState.value
         val allowLoggedInDownload =
@@ -130,11 +135,11 @@ class DownloadsRepositoryImpl @Inject constructor(
         downloadTaskDao.upsert(
             DownloadTaskEntity(
                 taskId = taskId,
-                publishedFileId = item.publishedFileId,
-                appId = item.appId,
-                title = item.title,
-                previewUrl = item.previewUrl,
-                sourceUrl = item.fileUrl ?: "steam://publishedfile/${item.publishedFileId}",
+                publishedFileId = preparedItem.publishedFileId,
+                appId = preparedItem.appId,
+                title = preparedItem.title,
+                previewUrl = preparedItem.previewUrl,
+                sourceUrl = preparedItem.fileUrl ?: "steam://publishedfile/${preparedItem.publishedFileId}",
                 fileName = fileName,
                 downloadFolderName = downloadFolderName,
                 targetTreeUri = prefs.downloadTreeUri,
@@ -157,7 +162,7 @@ class DownloadsRepositoryImpl @Inject constructor(
                 pauseRequested = false,
                 progressPercent = 0,
                 bytesDownloaded = 0,
-                totalBytes = item.fileSize,
+                totalBytes = preparedItem.fileSize,
                 savedFileUri = null,
                 errorMessage = null,
                 createdAt = now,
@@ -170,14 +175,14 @@ class DownloadsRepositoryImpl @Inject constructor(
             ExistingWorkPolicy.REPLACE,
             buildWorkRequest(
                 taskId = taskId,
-                url = item.fileUrl,
+                url = preparedItem.fileUrl,
                 fileName = fileName,
-                title = item.title,
+                title = preparedItem.title,
                 targetTreeUri = prefs.downloadTreeUri,
                 downloadFolderName = downloadFolderName,
-                appId = item.appId,
-                publishedFileId = item.publishedFileId,
-                contentManifestId = item.contentManifestId,
+                appId = preparedItem.appId,
+                publishedFileId = preparedItem.publishedFileId,
+                contentManifestId = preparedItem.contentManifestId,
                 downloadAuthMode = authMode,
                 boundAccountName = boundAccountName,
                 boundSteamId64 = boundSteamId64,
@@ -185,7 +190,7 @@ class DownloadsRepositoryImpl @Inject constructor(
         )
         AppLog.i(
             LOG_TAG,
-            "enqueue scheduled taskId=$taskId publishedFileId=${item.publishedFileId} authMode=$authMode",
+            "enqueue scheduled taskId=$taskId publishedFileId=${preparedItem.publishedFileId} authMode=$authMode",
         )
         return Result.success(Unit)
     }
@@ -199,7 +204,7 @@ class DownloadsRepositoryImpl @Inject constructor(
         }
 
         runCatching {
-            val latestItem = steamRepository.resolveWorkshopItem(existing.publishedFileId).getOrThrow()
+            val latestItem = steamRepository.resolveWorkshopItemForDownload(existing.publishedFileId).getOrThrow()
             requeueExistingTask(existing, latestItem)
         }
     }
@@ -237,7 +242,7 @@ class DownloadsRepositoryImpl @Inject constructor(
             return@withContext Result.failure(IllegalStateException("正在暂停，请稍候"))
         }
         val latestItem = runCatching {
-            steamRepository.resolveWorkshopItem(existing.publishedFileId).getOrThrow()
+            steamRepository.resolveWorkshopItemForDownload(existing.publishedFileId).getOrThrow()
         }.getOrNull()
 
         downloadTaskDao.upsert(
@@ -570,6 +575,18 @@ class DownloadsRepositoryImpl @Inject constructor(
             boundAccountName = session.account?.accountName,
             boundSteamId64 = session.account?.steamId64,
         )
+    }
+
+    private suspend fun prepareItemForDownload(item: WorkshopItem): WorkshopItem {
+        if (!item.needsDownloadPreparation()) return item
+        return runCatching {
+            steamRepository.resolveWorkshopItemForDownload(item.publishedFileId).getOrThrow()
+        }.getOrElse { item }
+    }
+
+    private fun WorkshopItem.needsDownloadPreparation(): Boolean {
+        return publishedFileId > 0L &&
+            (!isDownloadInfoResolved || !canDownload || hasChildItems)
     }
 
     private suspend fun removeDuplicateEntries(existing: DownloadTaskEntity) {

@@ -1,5 +1,6 @@
 package com.slay.workshopnative.ui.feature.workshop
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
@@ -10,9 +11,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -25,10 +28,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardActions
+import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.FilterAlt
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -36,6 +42,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -50,6 +58,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -62,7 +72,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -79,9 +96,18 @@ import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.model.WorkshopBrowseSectionOption
 import com.slay.workshopnative.data.model.WorkshopBrowseSortOption
 import com.slay.workshopnative.data.model.WorkshopBrowseTagGroup
+import com.slay.workshopnative.data.model.WorkshopBrowseTagGroupSelectionMode
+import com.slay.workshopnative.data.model.WorkshopBrowseTagOption
+import com.slay.workshopnative.data.model.WorkshopDateRangeFilter
 import com.slay.workshopnative.data.model.WorkshopItem
 import com.slay.workshopnative.ui.components.ArtworkThumbnail
 import com.slay.workshopnative.ui.components.ExpandableBodyText
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -97,6 +123,7 @@ fun WorkshopScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val focusManager = LocalFocusManager.current
+    val density = LocalDensity.current
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
     var showFilters by rememberSaveable { mutableStateOf(false) }
@@ -104,11 +131,26 @@ fun WorkshopScreen(
     var showSortPicker by rememberSaveable { mutableStateOf(false) }
     var showPeriodPicker by rememberSaveable { mutableStateOf(false) }
     var searchText by rememberSaveable(appId, launchMode.name) { mutableStateOf("") }
+    var isSearchFieldFocused by rememberSaveable(appId, launchMode.name) { mutableStateOf(false) }
+    var suppressExitBackAfterSearch by rememberSaveable(appId, launchMode.name) { mutableStateOf(false) }
     val isSubscriptionMode = state.launchMode == WorkshopLaunchMode.Subscriptions
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
 
     LaunchedEffect(state.query.searchText) {
         if (searchText != state.query.searchText) {
             searchText = state.query.searchText
+        }
+    }
+
+    LaunchedEffect(suppressExitBackAfterSearch) {
+        if (!suppressExitBackAfterSearch) return@LaunchedEffect
+        delay(650)
+        suppressExitBackAfterSearch = false
+    }
+
+    BackHandler(enabled = !isSubscriptionMode && (isSearchFieldFocused || imeVisible || suppressExitBackAfterSearch)) {
+        if (isSearchFieldFocused || imeVisible) {
+            focusManager.clearFocus(force = true)
         }
     }
 
@@ -175,11 +217,15 @@ fun WorkshopScreen(
                 onSwitchToBrowse = viewModel::switchToBrowseMode,
                 isRefreshing = state.isRefreshing,
                 query = state.query,
+                sectionOptions = state.sectionOptions,
+                sortOptions = state.sortOptions,
+                periodOptions = state.periodOptions,
                 activeTagCount = state.query.requiredTags.size + state.query.excludedTags.size,
                 searchText = searchText,
                 onSearchTextChange = { searchText = it },
+                onSearchFocusChanged = { isSearchFieldFocused = it },
                 onSubmitSearch = {
-                    focusManager.clearFocus(force = true)
+                    suppressExitBackAfterSearch = true
                     val normalized = searchText.trim()
                     if (normalized != state.query.searchText) {
                         viewModel.applyQuery(state.query.copy(searchText = normalized, page = 1))
@@ -455,25 +501,32 @@ private fun WorkshopTopBarModern(
     onOpenSubscriptions: () -> Unit,
     onSwitchToBrowse: () -> Unit,
     onSearchTextChange: (String) -> Unit,
+    onSearchFocusChanged: (Boolean) -> Unit,
     onSubmitSearch: () -> Unit,
     onClearSearch: () -> Unit,
+    sectionOptions: List<WorkshopBrowseSectionOption>,
+    sortOptions: List<WorkshopBrowseSortOption>,
+    periodOptions: List<WorkshopBrowsePeriodOption>,
 ) {
-    val advancedFilterCount = activeTagCount + if (query.showIncompatible) 1 else 0
+    val advancedFilterCount = query.activeAdvancedFilterCount()
     val supportsPeriod = query.sortKey == WorkshopBrowseQuery.SORT_TREND
     val isSubscriptionMode = launchMode == WorkshopLaunchMode.Subscriptions
     val isInitialSync = !hasLoadedOnce
     val headerEyebrow = if (isSubscriptionMode) "我的订阅" else "创意工坊"
+    val currentSectionLabel = resolveSectionLabel(query.sectionKey, sectionOptions)
+    val currentSortLabel = resolveSortLabel(query.sortKey, sortOptions)
+    val currentPeriodLabel = resolvePeriodLabel(query.periodDays, periodOptions)
     val headerMeta = buildList {
         if (!isInitialSync) {
             add(if (isSubscriptionMode) "已订阅 $totalCount 项" else "$totalCount 个条目")
         }
         if (!isSubscriptionMode) {
             if (query.sectionKey != WorkshopBrowseQuery.SECTION_ITEMS) {
-                add(sectionLabel(query.sectionKey))
+                add(currentSectionLabel)
             }
-            add(sortLabel(query.sortKey))
+            add(currentSortLabel)
             if (supportsPeriod) {
-                add(periodLabel(query.periodDays))
+                add(currentPeriodLabel)
             }
         }
     }.joinToString(" · ")
@@ -597,7 +650,20 @@ private fun WorkshopTopBarModern(
                     onValueChange = onSearchTextChange,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(54.dp),
+                        .height(54.dp)
+                        .onFocusChanged { focusState ->
+                            onSearchFocusChanged(focusState.isFocused)
+                        }
+                        .onPreviewKeyEvent { keyEvent ->
+                            when {
+                                keyEvent.type != KeyEventType.KeyUp -> false
+                                keyEvent.key != Key.Enter && keyEvent.key != Key.NumPadEnter -> false
+                                else -> {
+                                    onSubmitSearch()
+                                    true
+                                }
+                            }
+                        },
                     singleLine = true,
                     placeholder = { Text("搜索创意工坊条目") },
                     leadingIcon = {
@@ -611,7 +677,10 @@ private fun WorkshopTopBarModern(
                         }
                     },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { onSubmitSearch() }),
+                    keyboardActions = KeyboardActions(
+                        onSearch = { onSubmitSearch() },
+                        onDone = { onSubmitSearch() },
+                    ),
                     shape = RoundedCornerShape(18.dp),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedContainerColor = Color.White.copy(alpha = 0.72f),
@@ -630,16 +699,16 @@ private fun WorkshopTopBarModern(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     QuickFilterChip(
-                        label = sectionLabel(query.sectionKey),
+                        label = currentSectionLabel,
                         onClick = onOpenSectionPicker,
                     )
                     QuickFilterChip(
-                        label = sortLabel(query.sortKey),
+                        label = currentSortLabel,
                         onClick = onOpenSortPicker,
                     )
                     if (supportsPeriod) {
                         QuickFilterChip(
-                            label = periodLabel(query.periodDays),
+                            label = currentPeriodLabel,
                             onClick = onOpenPeriodPicker,
                         )
                     }
@@ -681,6 +750,12 @@ private fun WorkshopTopBarModern(
                         }
                         if (query.showIncompatible) {
                             InfoPill(text = "含不兼容")
+                        }
+                        if (query.createdDateRange.isActive) {
+                            InfoPill(text = query.createdDateRange.summaryLabel("发布时间"))
+                        }
+                        if (query.updatedDateRange.isActive) {
+                            InfoPill(text = query.updatedDateRange.summaryLabel("最后更新时间"))
                         }
                     }
                 }
@@ -1461,7 +1536,28 @@ private fun FilterSheet(
     onApply: (WorkshopBrowseQuery) -> Unit,
 ) {
     var draft by remember(currentQuery) { mutableStateOf(currentQuery) }
-    val activeTagCount = draft.requiredTags.size + draft.excludedTags.size
+    var activeDatePicker by remember { mutableStateOf<WorkshopDatePickerRequest?>(null) }
+    var expandedSections by rememberSaveable(currentQuery, tagGroups) {
+        mutableStateOf(defaultExpandedWorkshopFilterSections(currentQuery, tagGroups))
+    }
+
+    activeDatePicker?.let { request ->
+        WorkshopDatePickerDialog(
+            title = request.dialogTitle(),
+            boundary = request.boundary,
+            initialEpochSeconds = draft.dateRangeFor(request.type).epochSecondsFor(request.boundary),
+            onDismiss = { activeDatePicker = null },
+            onConfirm = { epochSeconds ->
+                draft = draft.updateDateRange(request.type) { range ->
+                    when (request.boundary) {
+                        WorkshopDateBoundary.Start -> range.copy(startEpochSeconds = epochSeconds)
+                        WorkshopDateBoundary.End -> range.copy(endEpochSeconds = epochSeconds)
+                    }.normalized()
+                }
+                activeDatePicker = null
+            },
+        )
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -1503,6 +1599,10 @@ private fun FilterSheet(
                             draft.requiredTags.takeIf { it.isNotEmpty() }?.let { "包含 ${it.size}" },
                             draft.excludedTags.takeIf { it.isNotEmpty() }?.let { "排除 ${it.size}" },
                             draft.showIncompatible.takeIf { it }?.let { "含不兼容" },
+                            draft.createdDateRange.takeIf(WorkshopDateRangeFilter::isActive)
+                                ?.summaryLabel("发布时间"),
+                            draft.updatedDateRange.takeIf(WorkshopDateRangeFilter::isActive)
+                                ?.summaryLabel("最后更新时间"),
                         ).joinToString(" · ").ifBlank { "当前还没有启用高级筛选条件" },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1510,20 +1610,100 @@ private fun FilterSheet(
                 }
             }
 
+            FilterSection(
+                title = "按日期筛选",
+                subtitle = "与 Steam 官方公开页一致，可同时限制发布时间和最后更新时间。",
+                summary = draft.dateRangeSummaryLabel(),
+                expanded = "date" in expandedSections,
+                onToggle = {
+                    expandedSections = expandedSections.toggle("date")
+                },
+            ) {
+                DateRangeFilterBlock(
+                    title = "发布时间",
+                    range = draft.createdDateRange,
+                    onPickStart = {
+                        activeDatePicker = WorkshopDatePickerRequest(
+                            type = WorkshopDateRangeType.Created,
+                            boundary = WorkshopDateBoundary.Start,
+                        )
+                    },
+                    onPickEnd = {
+                        activeDatePicker = WorkshopDatePickerRequest(
+                            type = WorkshopDateRangeType.Created,
+                            boundary = WorkshopDateBoundary.End,
+                        )
+                    },
+                    onClearStart = {
+                        draft = draft.updateDateRange(WorkshopDateRangeType.Created) { range ->
+                            range.copy(startEpochSeconds = 0L).normalized()
+                        }
+                    },
+                    onClearEnd = {
+                        draft = draft.updateDateRange(WorkshopDateRangeType.Created) { range ->
+                            range.copy(endEpochSeconds = 0L).normalized()
+                        }
+                    },
+                    onClearRange = {
+                        draft = draft.updateDateRange(WorkshopDateRangeType.Created) {
+                            WorkshopDateRangeFilter()
+                        }
+                    },
+                )
+                DateRangeFilterBlock(
+                    title = "最后更新时间",
+                    range = draft.updatedDateRange,
+                    onPickStart = {
+                        activeDatePicker = WorkshopDatePickerRequest(
+                            type = WorkshopDateRangeType.Updated,
+                            boundary = WorkshopDateBoundary.Start,
+                        )
+                    },
+                    onPickEnd = {
+                        activeDatePicker = WorkshopDatePickerRequest(
+                            type = WorkshopDateRangeType.Updated,
+                            boundary = WorkshopDateBoundary.End,
+                        )
+                    },
+                    onClearStart = {
+                        draft = draft.updateDateRange(WorkshopDateRangeType.Updated) { range ->
+                            range.copy(startEpochSeconds = 0L).normalized()
+                        }
+                    },
+                    onClearEnd = {
+                        draft = draft.updateDateRange(WorkshopDateRangeType.Updated) { range ->
+                            range.copy(endEpochSeconds = 0L).normalized()
+                        }
+                    },
+                    onClearRange = {
+                        draft = draft.updateDateRange(WorkshopDateRangeType.Updated) {
+                            WorkshopDateRangeFilter()
+                        }
+                    },
+                )
+            }
+
             if (supportsIncompatibleFilter) {
-                Surface(
-                    color = Color.White.copy(alpha = 0.82f),
-                    shape = RoundedCornerShape(24.dp),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
+                FilterSection(
+                    title = "兼容性",
+                    subtitle = "控制是否把 Steam 标记为不兼容的条目也显示出来。",
+                    summary = if (draft.showIncompatible) "显示不兼容条目" else "默认隐藏不兼容条目",
+                    expanded = "incompatible" in expandedSections,
+                    onToggle = {
+                        expandedSections = expandedSections.toggle("incompatible")
+                    },
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
                             Text("显示不兼容条目", fontWeight = FontWeight.SemiBold)
                             Text(
                                 text = "把 Steam 标记为不兼容的条目也一并显示出来",
@@ -1541,35 +1721,81 @@ private fun FilterSheet(
 
             tagGroups.forEach { group ->
                 FilterSection(
-                    title = group.label,
-                    subtitle = "支持包含和排除两种条件",
+                    title = group.displayTitle(),
+                    subtitle = when (group.selectionMode) {
+                        WorkshopBrowseTagGroupSelectionMode.IncludeExclude -> "支持包含和排除两种条件"
+                        WorkshopBrowseTagGroupSelectionMode.SingleSelect -> "与 Steam 官方一致，同组内只能选一个值"
+                    },
+                    summary = group.summaryLabel(draft),
+                    expanded = group.sectionKey() in expandedSections,
+                    onToggle = {
+                        expandedSections = expandedSections.toggle(group.sectionKey())
+                    },
                 ) {
-                    group.tags.forEach { tag ->
-                        TagFilterRow(
-                            tagLabel = tag.label,
-                            included = draft.requiredTags.contains(tag.value),
-                            excluded = draft.excludedTags.contains(tag.value),
-                            onInclude = {
-                                draft = draft.copy(
-                                    requiredTags = draft.requiredTags
-                                        .toMutableSet()
-                                        .apply {
-                                            if (!add(tag.value)) remove(tag.value)
-                                        },
-                                    excludedTags = draft.excludedTags - tag.value,
+                    when (group.selectionMode) {
+                        WorkshopBrowseTagGroupSelectionMode.IncludeExclude -> {
+                            group.tags.forEach { tag ->
+                                TagFilterRow(
+                                    tagLabel = tag.displayLabel(),
+                                    included = draft.requiredTags.contains(tag.value),
+                                    excluded = draft.excludedTags.contains(tag.value),
+                                    onInclude = {
+                                        draft = draft.copy(
+                                            requiredTags = draft.requiredTags
+                                                .toMutableSet()
+                                                .apply {
+                                                    if (!add(tag.value)) remove(tag.value)
+                                                },
+                                            excludedTags = draft.excludedTags - tag.value,
+                                        )
+                                    },
+                                    onExclude = {
+                                        draft = draft.copy(
+                                            requiredTags = draft.requiredTags - tag.value,
+                                            excludedTags = draft.excludedTags
+                                                .toMutableSet()
+                                                .apply {
+                                                    if (!add(tag.value)) remove(tag.value)
+                                                },
+                                        )
+                                    },
                                 )
-                            },
-                            onExclude = {
-                                draft = draft.copy(
-                                    requiredTags = draft.requiredTags - tag.value,
-                                    excludedTags = draft.excludedTags
-                                        .toMutableSet()
-                                        .apply {
-                                            if (!add(tag.value)) remove(tag.value)
-                                        },
+                            }
+                        }
+
+                        WorkshopBrowseTagGroupSelectionMode.SingleSelect -> {
+                            val groupValues = group.tags.map { tag -> tag.value }.toSet()
+                            val selectedValue = group.tags.firstOrNull { tag ->
+                                draft.requiredTags.contains(tag.value)
+                            }?.value
+
+                            ChoiceRow(
+                                label = "不限",
+                                selected = selectedValue == null,
+                                onClick = {
+                                    draft = draft.copy(
+                                        requiredTags = draft.requiredTags - groupValues,
+                                        excludedTags = draft.excludedTags - groupValues,
+                                    )
+                                },
+                            )
+                            group.tags.forEach { tag ->
+                                ChoiceRow(
+                                    label = tag.displayLabel(),
+                                    selected = selectedValue == tag.value,
+                                    onClick = {
+                                        draft = draft.copy(
+                                            requiredTags = if (selectedValue == tag.value) {
+                                                draft.requiredTags - groupValues
+                                            } else {
+                                                (draft.requiredTags - groupValues) + tag.value
+                                            },
+                                            excludedTags = draft.excludedTags - groupValues,
+                                        )
+                                    },
                                 )
-                            },
-                        )
+                            }
+                        }
                     }
                 }
             }
@@ -1600,6 +1826,8 @@ private fun FilterSheet(
                                     requiredTags = emptySet(),
                                     excludedTags = emptySet(),
                                     showIncompatible = false,
+                                    createdDateRange = WorkshopDateRangeFilter(),
+                                    updatedDateRange = WorkshopDateRangeFilter(),
                                 )
                             },
                             modifier = Modifier.weight(1f),
@@ -1623,10 +1851,179 @@ private fun FilterSheet(
     }
 }
 
+private enum class WorkshopDateRangeType {
+    Created,
+    Updated,
+}
+
+private enum class WorkshopDateBoundary {
+    Start,
+    End,
+}
+
+private data class WorkshopDatePickerRequest(
+    val type: WorkshopDateRangeType,
+    val boundary: WorkshopDateBoundary,
+)
+
+@Composable
+private fun DateRangeFilterBlock(
+    title: String,
+    range: WorkshopDateRangeFilter,
+    onPickStart: () -> Unit,
+    onPickEnd: () -> Unit,
+    onClearStart: () -> Unit,
+    onClearEnd: () -> Unit,
+    onClearRange: () -> Unit,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f),
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = range.detailLabel().ifBlank { "未限制日期范围" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (range.isActive) {
+                    TextButton(onClick = onClearRange) {
+                        Text("清空")
+                    }
+                }
+            }
+
+            DateRangeValueRow(
+                label = "起始日期",
+                value = range.startEpochSeconds.formatWorkshopDateOrDefault(),
+                hasValue = range.startEpochSeconds > 0L,
+                onPick = onPickStart,
+                onClear = onClearStart,
+            )
+            DateRangeValueRow(
+                label = "结束日期",
+                value = range.endEpochSeconds.formatWorkshopDateOrDefault(),
+                hasValue = range.endEpochSeconds > 0L,
+                onPick = onPickEnd,
+                onClear = onClearEnd,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DateRangeValueRow(
+    label: String,
+    value: String,
+    hasValue: Boolean,
+    onPick: () -> Unit,
+    onClear: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        OutlinedButton(
+            onClick = onPick,
+            shape = RoundedCornerShape(16.dp),
+        ) {
+            Text(if (hasValue) "修改" else "选择")
+        }
+        if (hasValue) {
+            TextButton(onClick = onClear) {
+                Text("移除")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WorkshopDatePickerDialog(
+    title: String,
+    boundary: WorkshopDateBoundary,
+    initialEpochSeconds: Long,
+    onDismiss: () -> Unit,
+    onConfirm: (Long) -> Unit,
+) {
+    val datePickerState = rememberDatePickerState(
+        initialSelectedDateMillis = initialEpochSeconds.toDatePickerInitialMillis(),
+    )
+
+    DatePickerDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(
+                enabled = datePickerState.selectedDateMillis != null,
+                onClick = {
+                    val selectedMillis = datePickerState.selectedDateMillis ?: return@TextButton
+                    onConfirm(
+                        when (boundary) {
+                            WorkshopDateBoundary.Start -> selectedMillis.toEpochSecondsAtStartOfDay()
+                            WorkshopDateBoundary.End -> selectedMillis.toEpochSecondsAtEndOfDay()
+                        },
+                    )
+                },
+            ) {
+                Text("确定")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    ) {
+        DatePicker(
+            state = datePickerState,
+            title = { Text(title) },
+            showModeToggle = false,
+        )
+    }
+}
+
 @Composable
 private fun FilterSection(
     title: String,
     subtitle: String,
+    summary: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
     content: @Composable () -> Unit,
 ) {
     Card(
@@ -1638,28 +2035,51 @@ private fun FilterSection(
             modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.46f),
-                shape = RoundedCornerShape(20.dp),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggle),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(
-                    modifier = Modifier.padding(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
-                    content()
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = summary,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.46f),
+                    shape = RoundedCornerShape(20.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        content()
+                    }
                 }
             }
         }
@@ -1875,7 +2295,7 @@ private fun WorkshopItem.downloadModeLabel(autoResolveEnabled: Boolean): String 
 private fun sectionLabel(sectionKey: String): String {
     return when (sectionKey) {
         WorkshopBrowseQuery.SECTION_MY_SUBSCRIPTIONS -> "我的订阅"
-        WorkshopBrowseQuery.SECTION_ITEMS -> "条目"
+        WorkshopBrowseQuery.SECTION_ITEMS -> "项目"
         "collections" -> "合集"
         else -> sectionKey
     }
@@ -1883,9 +2303,9 @@ private fun sectionLabel(sectionKey: String): String {
 
 private fun sortLabel(sortKey: String): String {
     return when (sortKey) {
-        "trend" -> "热门"
+        "trend" -> "最热门"
         "mostrecent" -> "最新"
-        "lastupdated" -> "最近更新"
+        "lastupdated" -> "最后更新"
         "totaluniquesubscribers" -> "最多订阅"
         else -> sortKey
     }
@@ -1896,10 +2316,10 @@ private fun periodLabel(days: Int): String {
         1 -> "今天"
         7 -> "一周"
         30 -> "30 天"
-        90 -> "3 个月"
-        180 -> "6 个月"
-        365 -> "1 年"
-        -1 -> "全部时间"
+        90 -> "三个月"
+        180 -> "半年"
+        365 -> "一年"
+        -1 -> "有史以来"
         else -> "${days} 天"
     }
 }
@@ -1947,6 +2367,206 @@ private fun sortSupportsPeriod(sortKey: String): Boolean {
     return sortKey == WorkshopBrowseQuery.SORT_TREND
 }
 
+private fun resolveSectionLabel(
+    currentKey: String,
+    options: List<WorkshopBrowseSectionOption>,
+): String {
+    return options.firstOrNull { option -> option.key == currentKey }?.label ?: sectionLabel(currentKey)
+}
+
+private fun resolveSortLabel(
+    currentKey: String,
+    options: List<WorkshopBrowseSortOption>,
+): String {
+    return options.firstOrNull { option -> option.key == currentKey }?.label ?: sortLabel(currentKey)
+}
+
+private fun resolvePeriodLabel(
+    currentDays: Int,
+    options: List<WorkshopBrowsePeriodOption>,
+): String {
+    return options.firstOrNull { option -> option.days == currentDays }?.label ?: periodLabel(currentDays)
+}
+
+private val filterGroupTranslations = mapOf(
+    "Type" to "类型",
+    "Age Rating" to "年龄分级",
+    "Genre" to "风格",
+    "Content Type" to "内容类型",
+    "Addon Type" to "插件类型",
+    "Resolution" to "分辨率",
+    "Category" to "分类",
+    "Asset Type" to "资源类型",
+    "Asset Genre" to "资源风格",
+    "Script Type" to "脚本类型",
+    "Miscellaneous" to "杂项",
+    "Map Type" to "地图类型",
+    "Item Type" to "物品类型",
+    "Vehicle Type" to "载具类型",
+    "Skin Type" to "皮肤类型",
+    "Object Type" to "对象类型",
+)
+
+private val filterOptionTranslations = mapOf(
+    "Scene" to "场景",
+    "Video" to "视频",
+    "Application" to "应用程序",
+    "Web" to "网页",
+    "Everyone" to "全年龄",
+    "Questionable" to "可能成人",
+    "Mature" to "成人",
+    "Standard Definition" to "标准分辨率",
+    "Ultrawide Standard Definition" to "超宽标准分辨率",
+    "Dual Standard Definition" to "双屏标准分辨率",
+    "Triple Standard Definition" to "三屏标准分辨率",
+    "Portrait Standard Definition" to "竖屏标准分辨率",
+    "Other resolution" to "其他分辨率",
+    "Dynamic resolution" to "动态分辨率",
+    "Wallpaper" to "壁纸",
+    "Preset" to "预设",
+    "Asset" to "资源",
+    "Particle" to "粒子",
+    "Image" to "图像",
+    "Sound" to "音频",
+    "Model" to "模型",
+    "Text" to "文本",
+    "Sprite" to "精灵",
+    "Fullscreen" to "全屏",
+    "Composite" to "合成",
+    "Script" to "脚本",
+    "Effect" to "效果",
+    "Audio Visualizer" to "音频可视化",
+    "Background" to "背景",
+    "Character" to "角色",
+    "Clock" to "时钟",
+    "Fire" to "火焰",
+    "Interactive" to "互动",
+    "Magic" to "魔法",
+    "Post Processing" to "后期处理",
+    "Smoke" to "烟雾",
+    "Space" to "太空",
+    "Boolean" to "布尔值",
+    "Number" to "数值",
+    "String" to "字符串",
+    "No Animation" to "无动画",
+    "Oversized" to "超大",
+    "Approved" to "已审核",
+    "Audio responsive" to "音频响应",
+    "Customizable" to "可自定义",
+    "HDR" to "高动态范围",
+    "Media Integration" to "媒体集成",
+    "User Shortcut" to "用户快捷方式",
+    "Video Texture" to "视频纹理",
+    "Asset Pack" to "资源包",
+    "Abstract" to "抽象",
+    "Animal" to "动物",
+    "Anime" to "动漫",
+    "Cartoon" to "卡通",
+    "Cyberpunk" to "赛博朋克",
+    "Fantasy" to "奇幻",
+    "Game" to "游戏",
+    "Girls" to "女孩",
+    "Guys" to "男性",
+    "Landscape" to "风景",
+    "Medieval" to "中世纪",
+    "Memes" to "梗图",
+    "Music" to "音乐",
+    "Nature" to "自然",
+    "Pixel art" to "像素艺术",
+    "Relaxing" to "放松",
+    "Retro" to "复古",
+    "Sci-Fi" to "科幻",
+    "Sports" to "体育",
+    "Technology" to "科技",
+    "Television" to "电视",
+    "Vehicle" to "载具",
+    "Unspecified" to "未指定",
+)
+
+private fun defaultExpandedWorkshopFilterSections(
+    query: WorkshopBrowseQuery,
+    groups: List<WorkshopBrowseTagGroup>,
+): Set<String> {
+    return buildSet {
+        if (query.createdDateRange.isActive || query.updatedDateRange.isActive) {
+            add("date")
+        }
+        if (query.showIncompatible) {
+            add("incompatible")
+        }
+        groups.filter { group -> group.hasActiveSelection(query) }
+            .forEach { group -> add(group.sectionKey()) }
+    }
+}
+
+private fun Set<String>.toggle(key: String): Set<String> {
+    return if (key in this) this - key else this + key
+}
+
+private fun WorkshopBrowseTagGroup.sectionKey(): String = "group:$label"
+
+private fun WorkshopBrowseTagGroup.displayTitle(): String {
+    return localizeFilterDisplayText(label, filterGroupTranslations)
+}
+
+private fun WorkshopBrowseTagOption.displayLabel(): String {
+    return localizeFilterDisplayText(label, filterOptionTranslations)
+}
+
+private fun WorkshopBrowseTagGroup.summaryLabel(query: WorkshopBrowseQuery): String {
+    return when (selectionMode) {
+        WorkshopBrowseTagGroupSelectionMode.IncludeExclude -> {
+            val included = tags.filter { tag -> query.requiredTags.contains(tag.value) }
+            val excluded = tags.filter { tag -> query.excludedTags.contains(tag.value) }
+            listOfNotNull(
+                included.takeIf(List<WorkshopBrowseTagOption>::isNotEmpty)?.let { selected ->
+                    if (selected.size <= 2) {
+                        "包含：${selected.joinToString("、") { tag -> tag.displayLabel() }}"
+                    } else {
+                        "包含 ${selected.size} 项"
+                    }
+                },
+                excluded.takeIf(List<WorkshopBrowseTagOption>::isNotEmpty)?.let { selected ->
+                    if (selected.size <= 2) {
+                        "排除：${selected.joinToString("、") { tag -> tag.displayLabel() }}"
+                    } else {
+                        "排除 ${selected.size} 项"
+                    }
+                },
+            ).joinToString(" · ").ifBlank { "未设置" }
+        }
+
+        WorkshopBrowseTagGroupSelectionMode.SingleSelect -> {
+            tags.firstOrNull { tag -> query.requiredTags.contains(tag.value) }
+                ?.displayLabel()
+                ?.let { value -> "当前：$value" }
+                ?: "不限"
+        }
+    }
+}
+
+private fun WorkshopBrowseTagGroup.hasActiveSelection(query: WorkshopBrowseQuery): Boolean {
+    return tags.any { tag ->
+        tag.value in query.requiredTags || tag.value in query.excludedTags
+    }
+}
+
+private fun WorkshopBrowseQuery.dateRangeSummaryLabel(): String {
+    return listOfNotNull(
+        createdDateRange.takeIf(WorkshopDateRangeFilter::isActive)?.summaryLabel("发布时间"),
+        updatedDateRange.takeIf(WorkshopDateRangeFilter::isActive)?.summaryLabel("最后更新时间"),
+    ).joinToString(" · ").ifBlank { "未设置" }
+}
+
+private fun localizeFilterDisplayText(
+    raw: String,
+    translations: Map<String, String>,
+): String {
+    val trimmed = raw.trim()
+    if (trimmed.isBlank()) return raw
+    return translations[trimmed] ?: trimmed
+}
+
 private fun workshopPageCount(totalCount: Int, pageSize: Int): Int {
     if (totalCount <= 0) return 1
     return ((totalCount + pageSize - 1) / pageSize).coerceAtLeast(1)
@@ -1980,6 +2600,110 @@ private fun workshopSummaryText(
         if (query.showIncompatible) {
             add("含不兼容")
         }
+        if (query.createdDateRange.isActive) {
+            add(query.createdDateRange.summaryLabel("发布时间"))
+        }
+        if (query.updatedDateRange.isActive) {
+            add(query.updatedDateRange.summaryLabel("最后更新时间"))
+        }
     }
     return parts.joinToString(" · ")
+}
+
+private val workshopDateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy 年 M 月 d 日")
+
+private fun WorkshopBrowseQuery.activeAdvancedFilterCount(): Int {
+    return requiredTags.size +
+        excludedTags.size +
+        (if (showIncompatible) 1 else 0) +
+        (if (createdDateRange.isActive) 1 else 0) +
+        (if (updatedDateRange.isActive) 1 else 0)
+}
+
+private fun WorkshopBrowseQuery.dateRangeFor(type: WorkshopDateRangeType): WorkshopDateRangeFilter {
+    return when (type) {
+        WorkshopDateRangeType.Created -> createdDateRange
+        WorkshopDateRangeType.Updated -> updatedDateRange
+    }
+}
+
+private fun WorkshopBrowseQuery.updateDateRange(
+    type: WorkshopDateRangeType,
+    transform: (WorkshopDateRangeFilter) -> WorkshopDateRangeFilter,
+): WorkshopBrowseQuery {
+    return when (type) {
+        WorkshopDateRangeType.Created -> copy(createdDateRange = transform(createdDateRange).normalized())
+        WorkshopDateRangeType.Updated -> copy(updatedDateRange = transform(updatedDateRange).normalized())
+    }
+}
+
+private fun WorkshopDatePickerRequest.dialogTitle(): String {
+    val prefix = when (type) {
+        WorkshopDateRangeType.Created -> "发布时间"
+        WorkshopDateRangeType.Updated -> "最后更新时间"
+    }
+    val suffix = when (boundary) {
+        WorkshopDateBoundary.Start -> "起始日期"
+        WorkshopDateBoundary.End -> "结束日期"
+    }
+    return "$prefix - $suffix"
+}
+
+private fun WorkshopDateRangeFilter.epochSecondsFor(boundary: WorkshopDateBoundary): Long {
+    return when (boundary) {
+        WorkshopDateBoundary.Start -> startEpochSeconds
+        WorkshopDateBoundary.End -> endEpochSeconds
+    }
+}
+
+private fun WorkshopDateRangeFilter.summaryLabel(prefix: String): String {
+    return "$prefix ${detailLabel()}"
+}
+
+private fun WorkshopDateRangeFilter.detailLabel(): String {
+    val startLabel = startEpochSeconds.takeIf { it > 0L }?.formatWorkshopDate()
+    val endLabel = endEpochSeconds.takeIf { it > 0L }?.formatWorkshopDate()
+    return when {
+        startLabel != null && endLabel != null -> "$startLabel 到 $endLabel"
+        startLabel != null -> "$startLabel 之后"
+        endLabel != null -> "$endLabel 之前"
+        else -> ""
+    }
+}
+
+private fun Long.formatWorkshopDateOrDefault(): String {
+    return if (this > 0L) formatWorkshopDate() else "不限"
+}
+
+private fun Long.formatWorkshopDate(): String {
+    return Instant.ofEpochSecond(this)
+        .atZone(ZoneId.systemDefault())
+        .toLocalDate()
+        .format(workshopDateFormatter)
+}
+
+private fun Long.toDatePickerInitialMillis(): Long? {
+    if (this <= 0L) return null
+    val localDate = Instant.ofEpochSecond(this)
+        .atZone(ZoneId.systemDefault())
+        .toLocalDate()
+    return localDate.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+}
+
+private fun Long.toEpochSecondsAtStartOfDay(): Long {
+    val selectedDate = Instant.ofEpochMilli(this)
+        .atZone(ZoneOffset.UTC)
+        .toLocalDate()
+    return selectedDate.atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
+}
+
+private fun Long.toEpochSecondsAtEndOfDay(): Long {
+    val selectedDate = Instant.ofEpochMilli(this)
+        .atZone(ZoneOffset.UTC)
+        .toLocalDate()
+    return selectedDate
+        .plusDays(1)
+        .atStartOfDay(ZoneId.systemDefault())
+        .minusSeconds(1)
+        .toEpochSecond()
 }

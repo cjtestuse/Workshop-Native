@@ -10,9 +10,9 @@ import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
 import com.slay.workshopnative.data.preferences.DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY
+import com.slay.workshopnative.data.preferences.DownloadPerformanceMode
 import com.slay.workshopnative.data.repository.DownloadsRepository
 import com.slay.workshopnative.data.repository.SteamRepository
-import com.slay.workshopnative.data.preferences.DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS
 import com.slay.workshopnative.data.preferences.SavedSteamAccount
 import com.slay.workshopnative.data.preferences.UserPreferences
 import com.slay.workshopnative.data.preferences.UserPreferencesStore
@@ -62,12 +62,13 @@ data class SettingsUiState(
     val isLoggedInDownloadEnabled: Boolean = false,
     val isOwnedGamesDisplayEnabled: Boolean = false,
     val isSubscriptionDisplayEnabled: Boolean = false,
-    val autoCheckAppUpdates: Boolean = true,
+    val autoCheckAppUpdates: Boolean = false,
     val defaultGuestMode: Boolean = true,
     val downloadFolderName: String = DEFAULT_DOWNLOAD_FOLDER_NAME,
     val effectiveDownloadFolderName: String = DEFAULT_DOWNLOAD_FOLDER_NAME,
     val downloadTreeUri: String? = null,
     val downloadTreeLabel: String? = null,
+    val downloadPerformanceMode: DownloadPerformanceMode = DownloadPerformanceMode.Auto,
     val downloadChunkConcurrency: Int = DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY,
     val preferAnonymousDownloads: Boolean = true,
     val allowAuthenticatedDownloadFallback: Boolean = true,
@@ -118,6 +119,7 @@ class SettingsViewModel @Inject constructor(
             effectiveDownloadFolderName = effectiveFolderName,
             downloadTreeUri = prefs.downloadTreeUri,
             downloadTreeLabel = prefs.downloadTreeLabel,
+            downloadPerformanceMode = prefs.downloadPerformanceMode,
             downloadChunkConcurrency = prefs.downloadChunkConcurrency,
             preferAnonymousDownloads = prefs.preferAnonymousDownloads,
             allowAuthenticatedDownloadFallback = prefs.allowAuthenticatedDownloadFallback,
@@ -171,9 +173,17 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun saveDownloadChunkConcurrency(concurrency: Int) {
+    fun saveDownloadPerformanceMode(mode: DownloadPerformanceMode) {
         viewModelScope.launch {
-            preferencesStore.saveDownloadChunkConcurrency(concurrency)
+            preferencesStore.saveDownloadPerformanceMode(mode)
+            maintenanceState.value = MaintenanceUiState(
+                summary = when (mode) {
+                    DownloadPerformanceMode.Auto ->
+                        "已切到自动高性能下载。高内存设备会放宽并发，低内存设备仍会自动收紧。"
+                    DownloadPerformanceMode.Compatibility ->
+                        "已切到兼容模式。下载会更保守地限制并发和连接激进度。"
+                },
+            )
         }
     }
 

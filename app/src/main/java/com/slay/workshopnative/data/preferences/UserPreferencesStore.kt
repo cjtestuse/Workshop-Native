@@ -30,6 +30,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 const val DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY = 12
+const val COMPATIBILITY_DOWNLOAD_CHUNK_CONCURRENCY = 4
 const val MIN_DOWNLOAD_CHUNK_CONCURRENCY = 1
 const val MAX_DOWNLOAD_CHUNK_CONCURRENCY = 12
 val DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS = listOf(1, 2, 4, 6, 8, 12)
@@ -48,8 +49,20 @@ enum class CdnPoolPreference {
     PreferAkamai,
 }
 
+enum class DownloadPerformanceMode {
+    Auto,
+    Compatibility,
+}
+
 fun normalizeDownloadChunkConcurrency(value: Int): Int {
     return value.coerceIn(MIN_DOWNLOAD_CHUNK_CONCURRENCY, MAX_DOWNLOAD_CHUNK_CONCURRENCY)
+}
+
+fun requestedDownloadChunkConcurrency(mode: DownloadPerformanceMode): Int {
+    return when (mode) {
+        DownloadPerformanceMode.Auto -> DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY
+        DownloadPerformanceMode.Compatibility -> COMPATIBILITY_DOWNLOAD_CHUNK_CONCURRENCY
+    }
 }
 
 @Serializable
@@ -83,7 +96,7 @@ data class UserPreferences(
     val isSubscriptionDisplayEnabled: Boolean = false,
     val hasAcknowledgedDisclaimer: Boolean = false,
     val hasAcknowledgedUsageBoundary: Boolean = false,
-    val autoCheckAppUpdates: Boolean = true,
+    val autoCheckAppUpdates: Boolean = false,
     val defaultGuestMode: Boolean = true,
     val lastConnectionProfileLabel: String? = null,
     val lastCdnHost: String? = null,
@@ -93,6 +106,7 @@ data class UserPreferences(
     val downloadFolderName: String = DEFAULT_DOWNLOAD_FOLDER_NAME,
     val downloadTreeUri: String? = null,
     val downloadTreeLabel: String? = null,
+    val downloadPerformanceMode: DownloadPerformanceMode = DownloadPerformanceMode.Auto,
     val downloadChunkConcurrency: Int = DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY,
     val preferAnonymousDownloads: Boolean = true,
     val allowAuthenticatedDownloadFallback: Boolean = true,
@@ -136,6 +150,7 @@ class UserPreferencesStore @Inject constructor(
         val DOWNLOAD_FOLDER_NAME = stringPreferencesKey("download_folder_name")
         val DOWNLOAD_TREE_URI = stringPreferencesKey("download_tree_uri")
         val DOWNLOAD_TREE_LABEL = stringPreferencesKey("download_tree_label")
+        val DOWNLOAD_PERFORMANCE_MODE = stringPreferencesKey("download_performance_mode")
         val DOWNLOAD_CHUNK_CONCURRENCY = intPreferencesKey("download_chunk_concurrency")
         val PREFER_ANONYMOUS_DOWNLOADS = booleanPreferencesKey("prefer_anonymous_downloads")
         val ALLOW_AUTHENTICATED_DOWNLOAD_FALLBACK = booleanPreferencesKey("allow_authenticated_download_fallback")
@@ -175,6 +190,9 @@ class UserPreferencesStore @Inject constructor(
                 uri = prefs[DOWNLOAD_TREE_URI],
                 label = prefs[DOWNLOAD_TREE_LABEL],
             )
+            val downloadPerformanceMode = prefs[DOWNLOAD_PERFORMANCE_MODE]
+                ?.let { value -> runCatching { DownloadPerformanceMode.valueOf(value) }.getOrNull() }
+                ?: DownloadPerformanceMode.Auto
             val savedAccounts = if (isLoginFeatureEnabled) {
                 buildSavedAccounts(
                     accountName = actualActiveSessionProfile.accountName,
@@ -201,7 +219,7 @@ class UserPreferencesStore @Inject constructor(
                 isSubscriptionDisplayEnabled = prefs[ACCOUNT_SUBSCRIPTION_DISPLAY_ENABLED] ?: false,
                 hasAcknowledgedDisclaimer = prefs[HAS_ACKNOWLEDGED_DISCLAIMER] ?: false,
                 hasAcknowledgedUsageBoundary = prefs[HAS_ACKNOWLEDGED_USAGE_BOUNDARY] ?: false,
-                autoCheckAppUpdates = prefs[AUTO_CHECK_APP_UPDATES] ?: true,
+                autoCheckAppUpdates = prefs[AUTO_CHECK_APP_UPDATES] ?: false,
                 defaultGuestMode = prefs[DEFAULT_GUEST_MODE] ?: true,
                 lastConnectionProfileLabel = prefs[LAST_CONNECTION_PROFILE],
                 lastCdnHost = prefs[LAST_CDN_HOST],
@@ -215,9 +233,8 @@ class UserPreferencesStore @Inject constructor(
                 downloadFolderName = prefs[DOWNLOAD_FOLDER_NAME] ?: DEFAULT_DOWNLOAD_FOLDER_NAME,
                 downloadTreeUri = sanitizedDownloadTree.first,
                 downloadTreeLabel = sanitizedDownloadTree.second,
-                downloadChunkConcurrency = normalizeDownloadChunkConcurrency(
-                    prefs[DOWNLOAD_CHUNK_CONCURRENCY] ?: DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY,
-                ),
+                downloadPerformanceMode = downloadPerformanceMode,
+                downloadChunkConcurrency = requestedDownloadChunkConcurrency(downloadPerformanceMode),
                 preferAnonymousDownloads = prefs[PREFER_ANONYMOUS_DOWNLOADS] ?: true,
                 allowAuthenticatedDownloadFallback = prefs[ALLOW_AUTHENTICATED_DOWNLOAD_FALLBACK] ?: true,
                 workshopPageSize = WorkshopBrowseQuery.normalizePageSize(
@@ -508,8 +525,18 @@ class UserPreferencesStore @Inject constructor(
     }
 
     suspend fun saveDownloadChunkConcurrency(concurrency: Int) {
+        val mode = if (normalizeDownloadChunkConcurrency(concurrency) <= COMPATIBILITY_DOWNLOAD_CHUNK_CONCURRENCY) {
+            DownloadPerformanceMode.Compatibility
+        } else {
+            DownloadPerformanceMode.Auto
+        }
+        saveDownloadPerformanceMode(mode)
+    }
+
+    suspend fun saveDownloadPerformanceMode(mode: DownloadPerformanceMode) {
         dataStore.edit { prefs ->
-            prefs[DOWNLOAD_CHUNK_CONCURRENCY] = normalizeDownloadChunkConcurrency(concurrency)
+            prefs[DOWNLOAD_PERFORMANCE_MODE] = mode.name
+            prefs[DOWNLOAD_CHUNK_CONCURRENCY] = requestedDownloadChunkConcurrency(mode)
         }
     }
 

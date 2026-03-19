@@ -163,7 +163,7 @@ class WorkshopViewModel @Inject constructor(
                 isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
                 isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
                 canOpenSubscriptions = canUseSubscriptionFeatures(),
-                showSubscriptionState = canUseSubscriptionFeatures(),
+                showSubscriptionState = shouldShowSubscriptionState(effectiveLaunchMode),
                 selectedItem = null,
                 queueingPublishedFileId = null,
                 errorMessage = null,
@@ -465,7 +465,7 @@ class WorkshopViewModel @Inject constructor(
                             isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
                             isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
                             canOpenSubscriptions = canUseSubscriptionFeatures(),
-                            showSubscriptionState = canUseSubscriptionFeatures(),
+                            showSubscriptionState = shouldShowSubscriptionState(it.launchMode),
                             downloadIdentityLabel = downloadIdentityLabel(),
                             downloadIdentityDescription = downloadIdentityDescription(),
                         )
@@ -496,7 +496,7 @@ class WorkshopViewModel @Inject constructor(
                         isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
                         isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
                         canOpenSubscriptions = canUseSubscriptionFeatures(),
-                        showSubscriptionState = canUseSubscriptionFeatures(),
+                        showSubscriptionState = shouldShowSubscriptionState(state.launchMode),
                         downloadIdentityLabel = downloadIdentityLabel(),
                         downloadIdentityDescription = downloadIdentityDescription(),
                     )
@@ -551,7 +551,7 @@ class WorkshopViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         canOpenSubscriptions = canUseSubscriptionFeatures(),
-                        showSubscriptionState = canUseSubscriptionFeatures(),
+                        showSubscriptionState = shouldShowSubscriptionState(it.launchMode),
                         downloadIdentityLabel = downloadIdentityLabel(),
                         downloadIdentityDescription = downloadIdentityDescription(),
                     )
@@ -730,6 +730,10 @@ class WorkshopViewModel @Inject constructor(
         return isLoginFeatureEnabled &&
             isSubscriptionDisplayEnabled &&
             currentSessionStatus == SessionStatus.Authenticated
+    }
+
+    private fun shouldShowSubscriptionState(launchMode: WorkshopLaunchMode): Boolean {
+        return launchMode == WorkshopLaunchMode.Subscriptions && canUseSubscriptionFeatures()
     }
 
     private fun subscriptionsUnavailableMessage(): String {

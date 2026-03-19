@@ -37,13 +37,16 @@ import com.slay.workshopnative.data.model.WorkshopBrowsePeriodOption
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.model.WorkshopBrowseSectionOption
 import com.slay.workshopnative.data.model.WorkshopBrowseSortOption
+import com.slay.workshopnative.data.model.WorkshopDateRangeFilter
 import com.slay.workshopnative.data.model.WorkshopBrowseTagGroup
+import com.slay.workshopnative.data.model.WorkshopBrowseTagGroupSelectionMode
 import com.slay.workshopnative.data.model.WorkshopBrowseTagOption
 import com.slay.workshopnative.data.model.WorkshopGameEntry
 import com.slay.workshopnative.data.model.WorkshopGamePage
 import com.slay.workshopnative.data.model.WorkshopItem
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
+import com.slay.workshopnative.data.preferences.DownloadPerformanceMode
 import com.slay.workshopnative.data.preferences.MAX_DOWNLOAD_CHUNK_CONCURRENCY
 import com.slay.workshopnative.data.preferences.normalizeDownloadChunkConcurrency
 import com.slay.workshopnative.data.preferences.UserPreferencesStore
@@ -201,7 +204,8 @@ class SteamSessionManager @Inject constructor(
             """SharedFileBindMouseHover\(\s*"sharedfile_(\d+)"\s*,\s*false\s*,\s*(\{.*?\})\s*\);""",
             setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE),
         )
-        private val WORKSHOP_TOTAL_REGEX = Regex("""Showing\s+\d+\s*-\s*\d+\s+of\s+([\d,]+)\s+entries""")
+        private val WORKSHOP_TOTAL_EN_REGEX = Regex("""Showing\s+\d+\s*-\s*\d+\s+of\s+([\d,]+)\s+entries""")
+        private val WORKSHOP_TOTAL_ZH_REGEX = Regex("""正在显示第\s*\d+\s*-\s*\d+\s*项，共\s*([\d,]+)\s*项条目""")
         private val WORKSHOP_PAGE_LINK_REGEX = Regex("""[?&]p=(\d+)""")
         private val WORKSHOP_GAME_ENTRY_REGEX = Regex(
             """class="app"[^>]*onClick="top\.location\.href='https://steamcommunity\.com/app/(\d+)/workshop/'".*?itemPreviewHolder" style="background:\s*url\('([^']*)'.*?<img class="appLogo" src="([^"]+)" alt="([^"]+)".*?<div class="appNumItems">([^<]+)</div>""",
@@ -209,8 +213,14 @@ class SteamSessionManager @Inject constructor(
         )
         private val WORKSHOP_ITEM_COUNT_REGEX = Regex("""(\d[\d,]*)""")
         private val WORKSHOP_SECTION_REGEX = Regex("""section=([^"&]+)[^>]*&gt;([^<&]+)&lt;/a&gt;""")
-        private val WORKSHOP_SORT_DROPDOWN_REGEX = Regex("""Sort by&nbsp;.*?data-dropdown-html="(.*?)"[\s>]*""", RegexOption.DOT_MATCHES_ALL)
-        private val WORKSHOP_PERIOD_DROPDOWN_REGEX = Regex("""Over time period&nbsp;.*?data-dropdown-html="(.*?)"[\s>]*""", RegexOption.DOT_MATCHES_ALL)
+        private val WORKSHOP_SORTING_CONTROLS_REGEX = Regex(
+            """<div class="workshopBrowseSortingControls">(.*?)</div>""",
+            RegexOption.DOT_MATCHES_ALL,
+        )
+        private val WORKSHOP_DROPDOWN_HTML_REGEX = Regex(
+            """class="dropdown"\s+data-dropdown-html="(.*?)"[\s>]*""",
+            RegexOption.DOT_MATCHES_ALL,
+        )
         private val WORKSHOP_SORT_OPTION_REGEX = Regex("""actualsort=([^"&]+)[^>]*>([^<]+)</a>""")
         private val WORKSHOP_PERIOD_OPTION_REGEX = Regex("""days=([-0-9]+)[^>]*>([^<]+)</a>""")
         private val WORKSHOP_TAG_CATEGORY_REGEX = Regex("""<div class="tag_category_desc">\s*(.*?)\s*</div>""", RegexOption.DOT_MATCHES_ALL)
@@ -379,6 +389,16 @@ class SteamSessionManager @Inject constructor(
         val failure: Throwable? = null,
     )
 
+    private data class DownloadPerformanceProfile(
+        val mode: DownloadPerformanceMode,
+        val requestedChunkConcurrency: Int,
+        val chunkConcurrency: Int,
+        val maxRoutesPerTransport: Int,
+        val maxActiveRoutes: Int,
+        val dispatcherRequestFloor: Int,
+        val dispatcherPerHostFloor: Int,
+    )
+
     private class AnonymousContentSession(
         val profileLabel: String,
         val client: SteamClient,
@@ -434,6 +454,7 @@ class SteamSessionManager @Inject constructor(
     private val workshopGamePageCache = ConcurrentHashMap<Int, CachedValue<WorkshopGamePage>>()
     private val workshopGameSearchCache = ConcurrentHashMap<String, CachedValue<List<WorkshopGameEntry>>>()
     private val workshopItemCache = ConcurrentHashMap<Long, CachedValue<WorkshopItem>>()
+    private val downloadWorkshopItemCache = ConcurrentHashMap<Long, CachedValue<WorkshopItem>>()
     private val workshopContentAccessCache =
         ConcurrentHashMap<WorkshopContentAccessCacheKey, CachedValue<WorkshopContentAccess>>()
     private val cdnHostPerformanceTracker = ConcurrentHashMap<String, CdnHostPerformance>()
@@ -1024,9 +1045,7 @@ class SteamSessionManager @Inject constructor(
 
         Log.d(LOG_TAG, "resolveWorkshopItems count=${normalizedIds.size}")
         val cachedById = normalizedIds.associateWithNotNull { publishedFileId ->
-            workshopItemCache[publishedFileId]
-                ?.takeIf { it.isFresh(WORKSHOP_ITEM_CACHE_MS) }
-                ?.value
+            getCachedWorkshopItem(workshopItemCache, publishedFileId)
         }
         val missingIds = normalizedIds.filter { it !in cachedById }
         if (missingIds.isNotEmpty()) {
@@ -1035,20 +1054,9 @@ class SteamSessionManager @Inject constructor(
                     workshopItemCache[item.publishedFileId] = CachedValue(item)
                 }
 
-            val unresolvedIds = missingIds.filter { workshopItemCache[it]?.isFresh(WORKSHOP_ITEM_CACHE_MS) != true }
-            if (unresolvedIds.isNotEmpty() && canUseAuthenticatedWorkshopFallback()) {
-                loadPublishedFileDetailsAuthenticated(unresolvedIds)
-                    .map(::mapPublishedFileDetails)
-                    .forEach { item ->
-                        workshopItemCache[item.publishedFileId] = CachedValue(item)
-                    }
-            }
-
             if (normalizedIds.size <= 6) {
                 val itemsNeedingDetailPageFallback = missingIds.mapNotNull { publishedFileId ->
-                    workshopItemCache[publishedFileId]
-                        ?.takeIf { it.isFresh(WORKSHOP_ITEM_CACHE_MS) }
-                        ?.value
+                    getCachedWorkshopItem(workshopItemCache, publishedFileId)
                 }.filter { item -> item.needsWorkshopDetailPageFallback() }
 
                 if (itemsNeedingDetailPageFallback.isNotEmpty()) {
@@ -1072,9 +1080,53 @@ class SteamSessionManager @Inject constructor(
         }
 
         normalizedIds.mapNotNull { publishedFileId ->
-            workshopItemCache[publishedFileId]
-                ?.takeIf { it.isFresh(WORKSHOP_ITEM_CACHE_MS) }
-                ?.value
+            getCachedWorkshopItem(workshopItemCache, publishedFileId)
+                ?: cachedById[publishedFileId]
+        }
+    }
+
+    @WorkerThread
+    suspend fun resolveWorkshopItemForDownload(publishedFileId: Long): WorkshopItem = withContext(Dispatchers.IO) {
+        Log.d(LOG_TAG, "resolveWorkshopItemForDownload publishedFileId=$publishedFileId")
+        resolveWorkshopItemsForDownload(listOf(publishedFileId)).firstOrNull()
+            ?: error("未找到该创意工坊条目")
+    }
+
+    suspend fun resolveWorkshopItemsForDownload(
+        publishedFileIds: Collection<Long>,
+    ): List<WorkshopItem> = withContext(Dispatchers.IO) {
+        val normalizedIds = publishedFileIds
+            .filter { it > 0L }
+            .distinct()
+        if (normalizedIds.isEmpty()) return@withContext emptyList()
+
+        Log.d(LOG_TAG, "resolveWorkshopItemsForDownload count=${normalizedIds.size}")
+        val cachedById = normalizedIds.associateWithNotNull { publishedFileId ->
+            getCachedWorkshopItem(downloadWorkshopItemCache, publishedFileId)
+                ?: getCachedWorkshopItem(workshopItemCache, publishedFileId)
+        }
+        val missingIds = normalizedIds.filter { it !in cachedById }
+        if (missingIds.isNotEmpty()) {
+            resolveWorkshopItems(missingIds).forEach { item ->
+                downloadWorkshopItemCache[item.publishedFileId] = CachedValue(item)
+            }
+
+            val unresolvedIds = missingIds.filter { publishedFileId ->
+                getCachedWorkshopItem(downloadWorkshopItemCache, publishedFileId) == null &&
+                    getCachedWorkshopItem(workshopItemCache, publishedFileId) == null
+            }
+            if (unresolvedIds.isNotEmpty() && canUseAuthenticatedWorkshopFallback()) {
+                loadPublishedFileDetailsAuthenticated(unresolvedIds)
+                    .map(::mapPublishedFileDetails)
+                    .forEach { item ->
+                        downloadWorkshopItemCache[item.publishedFileId] = CachedValue(item)
+                    }
+            }
+        }
+
+        normalizedIds.mapNotNull { publishedFileId ->
+            getCachedWorkshopItem(downloadWorkshopItemCache, publishedFileId)
+                ?: getCachedWorkshopItem(workshopItemCache, publishedFileId)
                 ?: cachedById[publishedFileId]
         }
     }
@@ -1131,14 +1183,10 @@ class SteamSessionManager @Inject constructor(
                             prefs.allowAuthenticatedDownloadFallback
                         )
                 )
-        val anonymousSessionWarm =
-            downloadAuthMode == DownloadAuthMode.Auto &&
-                allowAuthenticatedFallback &&
-                hasWarmAnonymousContentSession()
         val anonymousFirst = when (downloadAuthMode) {
             DownloadAuthMode.Anonymous -> true
             DownloadAuthMode.Authenticated -> !allowAuthenticatedFallback
-            DownloadAuthMode.Auto -> !allowAuthenticatedFallback || anonymousSessionWarm
+            DownloadAuthMode.Auto -> true
         }
 
         val storageRoot = createWorkshopStorageRoot(
@@ -1148,19 +1196,21 @@ class SteamSessionManager @Inject constructor(
             downloadFolderName = downloadFolderName,
             existingRootRef = existingRootRef,
         )
-        val requestedChunkPrefetchCount = normalizeDownloadChunkConcurrency(prefs.downloadChunkConcurrency)
-        val chunkPrefetchCount = effectiveChunkConcurrency(requestedChunkPrefetchCount)
-        if (chunkPrefetchCount < requestedChunkPrefetchCount) {
+        val performanceProfile = effectiveDownloadPerformanceProfile(
+            requested = normalizeDownloadChunkConcurrency(prefs.downloadChunkConcurrency),
+            mode = prefs.downloadPerformanceMode,
+        )
+        if (performanceProfile.chunkConcurrency < performanceProfile.requestedChunkConcurrency) {
             Log.w(
                 LOG_TAG,
-                "downloadWorkshopItem clamp chunk concurrency requested=$requestedChunkPrefetchCount effective=$chunkPrefetchCount",
+                "downloadWorkshopItem clamp chunk concurrency requested=${performanceProfile.requestedChunkConcurrency} effective=${performanceProfile.chunkConcurrency}",
             )
         }
         val transportModes = prioritizedTransportModes(prefs.cdnTransportPreference)
         onStorageRootResolved(storageRoot.resumeRef)
         val failures = mutableListOf<String>()
 
-        if (downloadAuthMode == DownloadAuthMode.Auto && allowAuthenticatedFallback && !anonymousSessionWarm) {
+        if (downloadAuthMode == DownloadAuthMode.Auto && allowAuthenticatedFallback && !hasWarmAnonymousContentSession()) {
             appScope.launch {
                 runCatching { prewarmAnonymousContentSession() }
             }
@@ -1179,7 +1229,7 @@ class SteamSessionManager @Inject constructor(
                     manifestId = manifestId,
                     contentAccess = anonymousAccess,
                     storageRoot = storageRoot,
-                    chunkPrefetchCount = chunkPrefetchCount,
+                    performanceProfile = performanceProfile,
                     transportModes = transportModes,
                     cdnPoolPreference = prefs.cdnPoolPreference,
                     shouldPause = shouldPause,
@@ -1214,7 +1264,7 @@ class SteamSessionManager @Inject constructor(
                     manifestId = manifestId,
                     contentAccess = authenticatedAccess,
                     storageRoot = storageRoot,
-                    chunkPrefetchCount = chunkPrefetchCount,
+                    performanceProfile = performanceProfile,
                     transportModes = transportModes,
                     cdnPoolPreference = prefs.cdnPoolPreference,
                     shouldPause = shouldPause,
@@ -1246,7 +1296,7 @@ class SteamSessionManager @Inject constructor(
                     manifestId = manifestId,
                     contentAccess = anonymousAccess,
                     storageRoot = storageRoot,
-                    chunkPrefetchCount = chunkPrefetchCount,
+                    performanceProfile = performanceProfile,
                     transportModes = transportModes,
                     cdnPoolPreference = prefs.cdnPoolPreference,
                     shouldPause = shouldPause,
@@ -1579,6 +1629,7 @@ class SteamSessionManager @Inject constructor(
         depotKey: ByteArray,
         storageRoot: WorkshopStorageRoot,
         chunkPrefetchCount: Int,
+        maxActiveRoutes: Int,
         shouldPause: suspend () -> Boolean,
         onProgress: suspend (Long, Long) -> Unit,
     ) {
@@ -1654,6 +1705,7 @@ class SteamSessionManager @Inject constructor(
                                             chunk,
                                             depotKey,
                                             routes,
+                                            maxActiveRoutes,
                                             shouldPause,
                                         )
                                     }
@@ -1696,7 +1748,7 @@ class SteamSessionManager @Inject constructor(
 
     private fun createTransportClients(
         transportModes: List<Boolean>,
-        chunkPrefetchCount: Int,
+        performanceProfile: DownloadPerformanceProfile,
     ): List<TransportClient> {
         return transportModes
             .distinct()
@@ -1707,7 +1759,7 @@ class SteamSessionManager @Inject constructor(
                     transportDisplayLabel = if (forceDirect) "直连" else "系统网络",
                     client = createIsolatedCdnClient(
                         forceDirect = forceDirect,
-                        parallelism = chunkPrefetchCount,
+                        performanceProfile = performanceProfile,
                     ),
                 )
             }
@@ -1717,11 +1769,12 @@ class SteamSessionManager @Inject constructor(
         transportClients: List<TransportClient>,
         servers: List<Server>,
         contentAccess: WorkshopContentAccess,
+        maxRoutesPerTransport: Int = MAX_CDN_ROUTES_PER_TRANSPORT,
     ): List<CdnRoute> {
         var rank = 0
         return buildList {
             transportClients.forEach { transportClient ->
-                servers.take(MAX_CDN_ROUTES_PER_TRANSPORT).forEach { server ->
+                servers.take(maxRoutesPerTransport.coerceAtLeast(1)).forEach { server ->
                     val hostName = serverIdentity(server) ?: return@forEach
                     add(
                         CdnRoute(
@@ -1773,12 +1826,14 @@ class SteamSessionManager @Inject constructor(
     private fun selectActiveCdnRoutes(
         routes: List<CdnRoute>,
         excludedHosts: Set<String> = emptySet(),
+        maxActiveRoutes: Int = MAX_ACTIVE_CDN_ROUTES,
     ): List<CdnRoute> {
         val preferredRoutes = selectPreferredCdnRoutes(routes, excludedHosts)
-        if (preferredRoutes.size <= MAX_ACTIVE_CDN_ROUTES) {
+        val effectiveLimit = maxActiveRoutes.coerceAtLeast(1)
+        if (preferredRoutes.size <= effectiveLimit) {
             return preferredRoutes
         }
-        return preferredRoutes.take(MAX_ACTIVE_CDN_ROUTES)
+        return preferredRoutes.take(effectiveLimit)
     }
 
     private fun transportSummaryLabel(routes: List<CdnRoute>): String {
@@ -1895,11 +1950,12 @@ class SteamSessionManager @Inject constructor(
         chunk: `in`.dragonbra.javasteam.types.ChunkData,
         depotKey: ByteArray,
         routes: List<CdnRoute>,
+        maxActiveRoutes: Int,
         shouldPause: suspend () -> Boolean,
     ): DownloadedChunk {
         val attemptedHosts = linkedSetOf<String>()
         var lastError: Throwable? = null
-        val candidateRoutes = selectActiveCdnRoutes(routes)
+        val candidateRoutes = selectActiveCdnRoutes(routes, maxActiveRoutes = maxActiveRoutes)
         val maxAttempts = candidateRoutes.size.coerceAtMost(MAX_CDN_ROUTE_ATTEMPTS_PER_CHUNK).coerceAtLeast(1)
 
         repeat(maxAttempts) {
@@ -1908,7 +1964,11 @@ class SteamSessionManager @Inject constructor(
                 throw DownloadPausedException()
             }
 
-            val route = selectActiveCdnRoutes(candidateRoutes, attemptedHosts).firstOrNull() ?: return@repeat
+            val route = selectActiveCdnRoutes(
+                candidateRoutes,
+                attemptedHosts,
+                maxActiveRoutes = maxActiveRoutes,
+            ).firstOrNull() ?: return@repeat
             attemptedHosts += route.hostName
             route.performance.beginRequest()
             val startedAt = System.nanoTime()
@@ -1973,7 +2033,7 @@ class SteamSessionManager @Inject constructor(
         manifestId: Long,
         contentAccess: WorkshopContentAccess,
         storageRoot: WorkshopStorageRoot,
-        chunkPrefetchCount: Int,
+        performanceProfile: DownloadPerformanceProfile,
         transportModes: List<Boolean>,
         cdnPoolPreference: CdnPoolPreference,
         shouldPause: suspend () -> Boolean,
@@ -1994,13 +2054,14 @@ class SteamSessionManager @Inject constructor(
         )
         val transportClients = createTransportClients(
             transportModes = transportModes,
-            chunkPrefetchCount = chunkPrefetchCount,
+            performanceProfile = performanceProfile,
         )
         try {
             val routes = buildCdnRoutes(
                 transportClients = transportClients,
                 servers = candidateServers,
                 contentAccess = contentAccess,
+                maxRoutesPerTransport = performanceProfile.maxRoutesPerTransport,
             )
             check(routes.isNotEmpty()) { "${contentAccess.accessLabel} 没有可用的 Steam CDN 路由" }
 
@@ -2011,7 +2072,7 @@ class SteamSessionManager @Inject constructor(
                 "${routes.size} 个 CDN 节点并发",
                 sourceAddress,
                 1,
-                chunkPrefetchCount,
+                performanceProfile.chunkConcurrency,
                 null,
             )
 
@@ -2029,7 +2090,8 @@ class SteamSessionManager @Inject constructor(
                 routes = routes,
                 depotKey = contentAccess.depotKey,
                 storageRoot = storageRoot,
-                chunkPrefetchCount = chunkPrefetchCount,
+                chunkPrefetchCount = performanceProfile.chunkConcurrency,
+                maxActiveRoutes = performanceProfile.maxActiveRoutes,
                 shouldPause = shouldPause,
                 onProgress = onProgress,
             )
@@ -2364,6 +2426,15 @@ class SteamSessionManager @Inject constructor(
             _sessionState.value.status == SessionStatus.Authenticated
     }
 
+    private fun getCachedWorkshopItem(
+        cache: ConcurrentHashMap<Long, CachedValue<WorkshopItem>>,
+        publishedFileId: Long,
+    ): WorkshopItem? {
+        return cache[publishedFileId]
+            ?.takeIf { it.isFresh(WORKSHOP_ITEM_CACHE_MS) }
+            ?.value
+    }
+
     private fun createWorkshopStorageRoot(
         stagingTaskId: String,
         rootName: String,
@@ -2572,12 +2643,22 @@ class SteamSessionManager @Inject constructor(
 
     private fun createIsolatedCdnClient(
         forceDirect: Boolean,
-        parallelism: Int,
+        performanceProfile: DownloadPerformanceProfile,
     ): SteamCdnClient {
-        val normalizedParallelism = parallelism.coerceIn(1, MAX_DOWNLOAD_CHUNK_CONCURRENCY)
+        val normalizedParallelism = performanceProfile.chunkConcurrency.coerceIn(1, MAX_DOWNLOAD_CHUNK_CONCURRENCY)
         val dispatcher = Dispatcher().apply {
-            maxRequests = (normalizedParallelism * 2).coerceAtLeast(8)
-            maxRequestsPerHost = (normalizedParallelism + 2).coerceAtLeast(4)
+            maxRequests = when (performanceProfile.mode) {
+                DownloadPerformanceMode.Auto ->
+                    (normalizedParallelism * 2).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
+                DownloadPerformanceMode.Compatibility ->
+                    (normalizedParallelism + 1).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
+            }
+            maxRequestsPerHost = when (performanceProfile.mode) {
+                DownloadPerformanceMode.Auto ->
+                    (normalizedParallelism + 2).coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
+                DownloadPerformanceMode.Compatibility ->
+                    normalizedParallelism.coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
+            }
         }
         val connectionPool = cdnConnectionPoolCache.getOrPut(forceDirect) {
             ConnectionPool(64, 10, TimeUnit.MINUTES)
@@ -2604,7 +2685,10 @@ class SteamSessionManager @Inject constructor(
         return SteamCdnClient(SteamClient(configuration))
     }
 
-    private fun effectiveChunkConcurrency(requested: Int): Int {
+    private fun effectiveDownloadPerformanceProfile(
+        requested: Int,
+        mode: DownloadPerformanceMode,
+    ): DownloadPerformanceProfile {
         val normalizedRequested = requested.coerceIn(1, MAX_DOWNLOAD_CHUNK_CONCURRENCY)
         val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
         val runtimeHeapMb = (Runtime.getRuntime().maxMemory() / (1024L * 1024L)).toInt().coerceAtLeast(1)
@@ -2615,13 +2699,47 @@ class SteamSessionManager @Inject constructor(
         } else {
             false
         }
-        val ceiling = when {
-            isLowRamDevice || heapBudgetMb <= 256 -> 2
-            heapBudgetMb <= 384 -> 4
-            heapBudgetMb <= 512 -> 6
-            else -> 8
+        val ceiling = when (mode) {
+            DownloadPerformanceMode.Auto -> when {
+                isLowRamDevice || heapBudgetMb <= 256 -> 2
+                heapBudgetMb <= 384 -> 4
+                heapBudgetMb <= 512 -> 6
+                heapBudgetMb <= 768 -> 8
+                heapBudgetMb <= 1024 -> 10
+                else -> 12
+            }
+
+            DownloadPerformanceMode.Compatibility -> when {
+                isLowRamDevice || heapBudgetMb <= 256 -> 1
+                heapBudgetMb <= 384 -> 2
+                heapBudgetMb <= 512 -> 3
+                else -> 4
+            }
         }
-        return normalizedRequested.coerceAtMost(ceiling).coerceAtLeast(1)
+        val chunkConcurrency = normalizedRequested.coerceAtMost(ceiling).coerceAtLeast(1)
+        return when (mode) {
+            DownloadPerformanceMode.Auto ->
+                DownloadPerformanceProfile(
+                    mode = mode,
+                    requestedChunkConcurrency = normalizedRequested,
+                    chunkConcurrency = chunkConcurrency,
+                    maxRoutesPerTransport = MAX_CDN_ROUTES_PER_TRANSPORT,
+                    maxActiveRoutes = MAX_ACTIVE_CDN_ROUTES,
+                    dispatcherRequestFloor = 8,
+                    dispatcherPerHostFloor = 4,
+                )
+
+            DownloadPerformanceMode.Compatibility ->
+                DownloadPerformanceProfile(
+                    mode = mode,
+                    requestedChunkConcurrency = normalizedRequested,
+                    chunkConcurrency = chunkConcurrency,
+                    maxRoutesPerTransport = 2,
+                    maxActiveRoutes = 2,
+                    dispatcherRequestFloor = 4,
+                    dispatcherPerHostFloor = 2,
+                )
+        }
     }
 
     private fun hasSystemProxy(): Boolean {
@@ -3710,6 +3828,8 @@ class SteamSessionManager @Inject constructor(
         appId: Int,
         query: WorkshopBrowseQuery,
     ) = STEAM_COMMUNITY_URL.toHttpUrl().newBuilder().apply {
+        val createdDateRange = query.createdDateRange.normalized()
+        val updatedDateRange = query.updatedDateRange.normalized()
         addQueryParameter("appid", appId.toString())
         addQueryParameter("l", "schinese")
         addQueryParameter("actualsort", query.sortKey)
@@ -3734,6 +3854,14 @@ class SteamSessionManager @Inject constructor(
         if (query.showIncompatible) {
             addQueryParameter("requiredflags[]", "incompatible")
         }
+        appendWorkshopDateRangeQueryParameters(
+            prefix = "created",
+            range = createdDateRange,
+        )
+        appendWorkshopDateRangeQueryParameters(
+            prefix = "updated",
+            range = updatedDateRange,
+        )
     }.build()
 
     private fun workshopBrowseCacheKey(
@@ -3796,17 +3924,13 @@ class SteamSessionManager @Inject constructor(
                     contentManifestId = 0L,
                     childPublishedFileIds = emptyList(),
                     tags = emptyList(),
-                    isSubscribed = payload["user_subscribed"]?.jsonPrimitive?.booleanOrNull == true,
+                    isSubscribed = false,
                     isDownloadInfoResolved = false,
                 )
             }
             .toList()
 
-        val totalCountFromSummary = WORKSHOP_TOTAL_REGEX.find(html)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.replace(",", "")
-            ?.toIntOrNull()
+        val totalCountFromSummary = parseWorkshopTotalCount(html)
         val maxPage = WORKSHOP_PAGE_LINK_REGEX.findAll(html)
             .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
             .maxOrNull()
@@ -3858,7 +3982,7 @@ class SteamSessionManager @Inject constructor(
                 val parsedLabel = htmlToPlainText(decodeHtml(it.groupValues[2]))
                 WorkshopBrowseSectionOption(
                     key = key,
-                    label = currentSectionLabel(key).takeUnless { known -> known == key } ?: parsedLabel,
+                    label = parsedLabel.takeIf(String::isNotBlank) ?: currentSectionLabel(key),
                 )
             }
             .distinctBy(WorkshopBrowseSectionOption::key)
@@ -3894,15 +4018,14 @@ class SteamSessionManager @Inject constructor(
     private fun currentSectionLabel(sectionKey: String): String {
         return when (sectionKey) {
             WorkshopBrowseQuery.SECTION_MY_SUBSCRIPTIONS -> "我的订阅"
-            WorkshopBrowseQuery.SECTION_ITEMS -> "条目"
+            WorkshopBrowseQuery.SECTION_ITEMS -> "项目"
             "collections" -> "合集"
             else -> sectionKey
         }
     }
 
     private fun parseWorkshopSortOptions(html: String): List<WorkshopBrowseSortOption> {
-        val encoded = WORKSHOP_SORT_DROPDOWN_REGEX.find(html)?.groupValues?.getOrNull(1).orEmpty()
-        val decoded = decodeHtml(encoded)
+        val decoded = parseWorkshopSortingDropdownHtml(html).firstOrNull().orEmpty()
         return WORKSHOP_SORT_OPTION_REGEX.findAll(decoded)
             .map {
                 val key = it.groupValues[1]
@@ -3917,8 +4040,7 @@ class SteamSessionManager @Inject constructor(
     }
 
     private fun parseWorkshopPeriodOptions(html: String): List<WorkshopBrowsePeriodOption> {
-        val encoded = WORKSHOP_PERIOD_DROPDOWN_REGEX.find(html)?.groupValues?.getOrNull(1).orEmpty()
-        val decoded = decodeHtml(encoded)
+        val decoded = parseWorkshopSortingDropdownHtml(html).getOrNull(1).orEmpty()
         return WORKSHOP_PERIOD_OPTION_REGEX.findAll(decoded)
             .mapNotNull {
                 val days = it.groupValues[1].toIntOrNull() ?: return@mapNotNull null
@@ -3931,29 +4053,107 @@ class SteamSessionManager @Inject constructor(
             .toList()
     }
 
+    private fun parseWorkshopSortingDropdownHtml(html: String): List<String> {
+        val controls = WORKSHOP_SORTING_CONTROLS_REGEX.find(html)
+            ?.groupValues
+            ?.getOrNull(1)
+            .orEmpty()
+        if (controls.isBlank()) return emptyList()
+        return WORKSHOP_DROPDOWN_HTML_REGEX.findAll(controls)
+            .map { match -> decodeHtml(match.groupValues[1]) }
+            .toList()
+    }
+
+    private fun parseWorkshopTotalCount(html: String): Int? {
+        return sequenceOf(
+            WORKSHOP_TOTAL_ZH_REGEX.find(html)?.groupValues?.getOrNull(1),
+            WORKSHOP_TOTAL_EN_REGEX.find(html)?.groupValues?.getOrNull(1),
+        )
+            .filterNotNull()
+            .map { value -> value.replace(",", "").toIntOrNull() }
+            .firstOrNull { value -> value != null }
+    }
+
+    private fun okhttp3.HttpUrl.Builder.appendWorkshopDateRangeQueryParameters(
+        prefix: String,
+        range: WorkshopDateRangeFilter,
+    ) {
+        if (range.startEpochSeconds > 0L) {
+            addQueryParameter("${prefix}_date_range_filter_start", range.startEpochSeconds.toString())
+        }
+        if (range.endEpochSeconds > 0L) {
+            addQueryParameter("${prefix}_date_range_filter_end", range.endEpochSeconds.toString())
+        }
+    }
+
     private fun parseWorkshopTagGroups(html: String): List<WorkshopBrowseTagGroup> {
-        val categoryMatches = WORKSHOP_TAG_CATEGORY_REGEX.findAll(html).toList()
-        if (categoryMatches.isEmpty()) {
-            val uncategorizedTags = parseTagOptions(html)
-            return uncategorizedTags.takeIf(List<WorkshopBrowseTagOption>::isNotEmpty)
-                ?.let { listOf(WorkshopBrowseTagGroup(label = "Tags", tags = it)) }
-                .orEmpty()
+        val document = Jsoup.parse(html)
+        val filterRoot = document.selectFirst("div.rightDetailsBlock") ?: return emptyList()
+        val groups = mutableListOf<WorkshopBrowseTagGroup>()
+        var currentLabel: String? = null
+        var currentMode = WorkshopBrowseTagGroupSelectionMode.IncludeExclude
+        var currentTags = mutableListOf<WorkshopBrowseTagOption>()
+
+        fun flushCurrentGroup() {
+            val label = currentLabel?.takeIf(String::isNotBlank) ?: return
+            if (currentTags.isEmpty()) return
+            groups += WorkshopBrowseTagGroup(
+                label = label,
+                tags = currentTags.toList(),
+                selectionMode = currentMode,
+            )
+            currentLabel = null
+            currentMode = WorkshopBrowseTagGroupSelectionMode.IncludeExclude
+            currentTags = mutableListOf()
         }
 
-        val groups = mutableListOf<WorkshopBrowseTagGroup>()
-        categoryMatches.forEachIndexed { index, match ->
-            val start = match.range.last + 1
-            val end = categoryMatches.getOrNull(index + 1)?.range?.first
-                ?: html.indexOf("incompatibleCheckbox").takeIf { it >= 0 }
-                ?: html.length
-            val tags = parseTagOptions(html.substring(start, end))
-            if (tags.isNotEmpty()) {
-                groups += WorkshopBrowseTagGroup(
-                    label = htmlToPlainText(match.groupValues[1]),
-                    tags = tags,
-                )
+        filterRoot.children().forEach { element ->
+            when {
+                element.hasClass("tag_category_desc") -> {
+                    flushCurrentGroup()
+                    currentLabel = element.text().trim()
+                }
+
+                element.tagName().equals("select", ignoreCase = true) &&
+                    element.hasClass("selectTagsFilter") -> {
+                    val label = currentLabel?.takeIf(String::isNotBlank) ?: return@forEach
+                    val options = element.select("option[value]")
+                        .mapNotNull { option ->
+                            val value = option.attr("value").trim()
+                            if (value.isBlank() || value == "-1") {
+                                null
+                            } else {
+                                WorkshopBrowseTagOption(
+                                    value = value,
+                                    label = option.text().trim(),
+                                )
+                            }
+                        }
+                    if (options.isNotEmpty()) {
+                        groups += WorkshopBrowseTagGroup(
+                            label = label,
+                            tags = options,
+                            selectionMode = WorkshopBrowseTagGroupSelectionMode.SingleSelect,
+                        )
+                    }
+                    currentLabel = null
+                }
+
+                element.hasClass("filterOption") -> {
+                    val input = element.selectFirst("input.inputTagsFilter[name=\"requiredtags[]\"][value]") ?: return@forEach
+                    if (currentLabel.isNullOrBlank()) {
+                        currentLabel = "标签"
+                    }
+                    currentMode = WorkshopBrowseTagGroupSelectionMode.IncludeExclude
+                    currentTags += WorkshopBrowseTagOption(
+                        value = input.attr("value").trim(),
+                        label = element.selectFirst("label")?.text()?.trim().orEmpty(),
+                    )
+                }
             }
         }
+
+        flushCurrentGroup()
         return groups
     }
 
@@ -3991,6 +4191,7 @@ class SteamSessionManager @Inject constructor(
         ownedGamesCacheSteamId64 = 0L
         ownedGamesCache = null
         workshopItemCache.clear()
+        downloadWorkshopItemCache.clear()
         workshopBrowsePageCache.clear()
         workshopSubscriptionsPageCache.clear()
         workshopGamePageCache.clear()
