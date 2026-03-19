@@ -77,6 +77,10 @@ data class UserPreferences(
     val steamId64: Long = 0,
     val rememberSession: Boolean = true,
     val savedAccounts: List<SavedSteamAccount> = emptyList(),
+    val isLoginFeatureEnabled: Boolean = false,
+    val isLoggedInDownloadEnabled: Boolean = false,
+    val isOwnedGamesDisplayEnabled: Boolean = false,
+    val isSubscriptionDisplayEnabled: Boolean = false,
     val hasAcknowledgedDisclaimer: Boolean = false,
     val hasAcknowledgedUsageBoundary: Boolean = false,
     val autoCheckAppUpdates: Boolean = true,
@@ -116,6 +120,10 @@ class UserPreferencesStore @Inject constructor(
         val STEAM_ID64 = longPreferencesKey("steam_id64")
         val REMEMBER_SESSION = booleanPreferencesKey("remember_session")
         val SAVED_ACCOUNTS_JSON = stringPreferencesKey("saved_accounts_json")
+        val ACCOUNT_LOGIN_ENABLED = booleanPreferencesKey("account_login_enabled")
+        val ACCOUNT_LOGIN_DOWNLOAD_ENABLED = booleanPreferencesKey("account_login_download_enabled")
+        val ACCOUNT_OWNED_GAMES_DISPLAY_ENABLED = booleanPreferencesKey("account_owned_games_display_enabled")
+        val ACCOUNT_SUBSCRIPTION_DISPLAY_ENABLED = booleanPreferencesKey("account_subscription_display_enabled")
         val HAS_ACKNOWLEDGED_DISCLAIMER = booleanPreferencesKey("has_acknowledged_disclaimer")
         val HAS_ACKNOWLEDGED_USAGE_BOUNDARY = booleanPreferencesKey("has_acknowledged_usage_boundary")
         val AUTO_CHECK_APP_UPDATES = booleanPreferencesKey("auto_check_app_updates")
@@ -149,22 +157,37 @@ class UserPreferencesStore @Inject constructor(
             if (throwable is IOException) emit(emptyPreferences()) else throw throwable
         }
         .map { prefs ->
-            val activeSessionProfile = secureSessionStore.readActiveSessionProfile()
-            val activeRefreshToken = secureSessionStore.readActiveRefreshToken()
+            val actualActiveSessionProfile = secureSessionStore.readActiveSessionProfile()
+            val actualActiveRefreshToken = secureSessionStore.readActiveRefreshToken()
                 .ifBlank { prefs[REFRESH_TOKEN].orEmpty() }
+            val isLoginFeatureEnabled = prefs[ACCOUNT_LOGIN_ENABLED] ?: false
+            val activeSessionProfile = if (isLoginFeatureEnabled) {
+                actualActiveSessionProfile
+            } else {
+                PersistedActiveSteamSession()
+            }
+            val activeRefreshToken = if (isLoginFeatureEnabled) {
+                actualActiveRefreshToken
+            } else {
+                ""
+            }
             val sanitizedDownloadTree = sanitizeDownloadTree(
                 uri = prefs[DOWNLOAD_TREE_URI],
                 label = prefs[DOWNLOAD_TREE_LABEL],
             )
-            val savedAccounts = buildSavedAccounts(
-                accountName = activeSessionProfile.accountName,
-                refreshToken = activeRefreshToken,
-                clientId = activeSessionProfile.clientId,
-                steamId64 = activeSessionProfile.steamId64,
-                rememberSession = prefs[REMEMBER_SESSION] ?: true,
-                persistedAccounts = secureSessionStore.readSavedAccountsMetadata(),
-                legacyEncodedAccounts = prefs[SAVED_ACCOUNTS_JSON],
-            )
+            val savedAccounts = if (isLoginFeatureEnabled) {
+                buildSavedAccounts(
+                    accountName = actualActiveSessionProfile.accountName,
+                    refreshToken = actualActiveRefreshToken,
+                    clientId = actualActiveSessionProfile.clientId,
+                    steamId64 = actualActiveSessionProfile.steamId64,
+                    rememberSession = prefs[REMEMBER_SESSION] ?: true,
+                    persistedAccounts = secureSessionStore.readSavedAccountsMetadata(),
+                    legacyEncodedAccounts = prefs[SAVED_ACCOUNTS_JSON],
+                )
+            } else {
+                emptyList()
+            }
             UserPreferences(
                 accountName = activeSessionProfile.accountName,
                 refreshToken = activeRefreshToken,
@@ -172,6 +195,10 @@ class UserPreferencesStore @Inject constructor(
                 steamId64 = activeSessionProfile.steamId64,
                 rememberSession = prefs[REMEMBER_SESSION] ?: true,
                 savedAccounts = savedAccounts,
+                isLoginFeatureEnabled = isLoginFeatureEnabled,
+                isLoggedInDownloadEnabled = prefs[ACCOUNT_LOGIN_DOWNLOAD_ENABLED] ?: false,
+                isOwnedGamesDisplayEnabled = prefs[ACCOUNT_OWNED_GAMES_DISPLAY_ENABLED] ?: false,
+                isSubscriptionDisplayEnabled = prefs[ACCOUNT_SUBSCRIPTION_DISPLAY_ENABLED] ?: false,
                 hasAcknowledgedDisclaimer = prefs[HAS_ACKNOWLEDGED_DISCLAIMER] ?: false,
                 hasAcknowledgedUsageBoundary = prefs[HAS_ACKNOWLEDGED_USAGE_BOUNDARY] ?: false,
                 autoCheckAppUpdates = prefs[AUTO_CHECK_APP_UPDATES] ?: true,
@@ -415,6 +442,30 @@ class UserPreferencesStore @Inject constructor(
     suspend fun saveDefaultGuestMode(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[DEFAULT_GUEST_MODE] = enabled
+        }
+    }
+
+    suspend fun saveLoginFeatureEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[ACCOUNT_LOGIN_ENABLED] = enabled
+        }
+    }
+
+    suspend fun saveLoggedInDownloadEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[ACCOUNT_LOGIN_DOWNLOAD_ENABLED] = enabled
+        }
+    }
+
+    suspend fun saveOwnedGamesDisplayEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[ACCOUNT_OWNED_GAMES_DISPLAY_ENABLED] = enabled
+        }
+    }
+
+    suspend fun saveSubscriptionDisplayEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[ACCOUNT_SUBSCRIPTION_DISPLAY_ENABLED] = enabled
         }
     }
 

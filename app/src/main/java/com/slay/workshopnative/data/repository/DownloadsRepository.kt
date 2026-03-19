@@ -26,4 +26,6 @@ interface DownloadsRepository {
     suspend fun reconcileActiveTasks()
 
     suspend fun rebindRetryableTasksToCurrentSession()
+
+    suspend fun enforceAnonymousOnly(reason: String)
 }

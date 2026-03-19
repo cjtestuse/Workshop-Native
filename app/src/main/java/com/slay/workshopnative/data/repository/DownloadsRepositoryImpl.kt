@@ -40,6 +40,12 @@ class DownloadsRepositoryImpl @Inject constructor(
         val boundSteamId64: Long?,
     )
 
+    private val activeStatuses = setOf(
+        DownloadStatus.Queued,
+        DownloadStatus.Running,
+        DownloadStatus.Paused,
+    )
+
     override val downloads: Flow<List<DownloadTaskEntity>> = downloadTaskDao.observeAll()
 
     override suspend fun enqueue(item: WorkshopItem): Result<Unit> {
@@ -108,8 +114,12 @@ class DownloadsRepositoryImpl @Inject constructor(
         val fileName = sanitizeFileName(item.fileName ?: item.title, "workshop-${item.publishedFileId}")
         val downloadFolderName = prefs.downloadFolderName
         val session = steamRepository.sessionState.value
+        val allowLoggedInDownload =
+            prefs.isLoginFeatureEnabled &&
+                prefs.isLoggedInDownloadEnabled &&
+                session.status == SessionStatus.Authenticated
         val authMode = when {
-            session.status != SessionStatus.Authenticated -> DownloadAuthMode.Anonymous
+            !allowLoggedInDownload -> DownloadAuthMode.Anonymous
             prefs.preferAnonymousDownloads -> DownloadAuthMode.Auto
             else -> DownloadAuthMode.Authenticated
         }
@@ -334,6 +344,48 @@ class DownloadsRepositoryImpl @Inject constructor(
             }
     }
 
+    override suspend fun enforceAnonymousOnly(reason: String) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        downloadTaskDao.getAll().forEach { task ->
+            if (task.downloadAuthMode == DownloadAuthMode.Anonymous &&
+                task.boundAccountName.isNullOrBlank() &&
+                task.boundSteamId64 == null
+            ) {
+                return@forEach
+            }
+
+            if (task.status in activeStatuses) {
+                workManager.cancelUniqueWork(task.taskId)
+            }
+
+            downloadTaskDao.upsert(
+                task.copy(
+                    sourceUrl = if (task.publishedFileId > 0L) {
+                        "steam://publishedfile/${task.publishedFileId}"
+                    } else {
+                        task.sourceUrl
+                    },
+                    targetTreeUri = if (task.status in activeStatuses) null else task.targetTreeUri,
+                    storageRootRef = null,
+                    downloadAuthMode = DownloadAuthMode.Anonymous,
+                    boundAccountName = null,
+                    boundSteamId64 = null,
+                    runtimeRouteLabel = null,
+                    runtimeTransportLabel = null,
+                    runtimeEndpointLabel = null,
+                    runtimeSourceAddress = null,
+                    runtimeAttemptCount = 0,
+                    runtimeChunkConcurrency = 0,
+                    runtimeLastFailure = null,
+                    status = if (task.status in activeStatuses) DownloadStatus.Cancelled else task.status,
+                    pauseRequested = false,
+                    errorMessage = if (task.status in activeStatuses) reason else task.errorMessage,
+                    updatedAt = now,
+                ),
+            )
+        }
+    }
+
     override suspend fun reconcileActiveTasks() = withContext(Dispatchers.IO) {
         downloadTaskDao.getActiveTasks().forEach { task ->
             val infos = runCatching { workManager.getWorkInfosForUniqueWork(task.taskId).get() }
@@ -507,6 +559,7 @@ class DownloadsRepositoryImpl @Inject constructor(
         val session = steamRepository.sessionState.value
         if (session.status != SessionStatus.Authenticated) return null
         val prefs = preferencesStore.snapshot()
+        if (!prefs.isLoginFeatureEnabled || !prefs.isLoggedInDownloadEnabled) return null
         val authMode = if (prefs.preferAnonymousDownloads) {
             DownloadAuthMode.Auto
         } else {

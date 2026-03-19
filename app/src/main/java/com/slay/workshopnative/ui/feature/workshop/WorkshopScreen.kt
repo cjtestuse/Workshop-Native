@@ -170,6 +170,8 @@ fun WorkshopScreen(
                 onOpenSectionPicker = { showSectionPicker = true },
                 onOpenSortPicker = { showSortPicker = true },
                 onOpenPeriodPicker = { showPeriodPicker = true },
+                canOpenSubscriptions = state.canOpenSubscriptions,
+                onOpenSubscriptions = viewModel::openSubscriptionsMode,
                 onSwitchToBrowse = viewModel::switchToBrowseMode,
                 isRefreshing = state.isRefreshing,
                 query = state.query,
@@ -250,6 +252,7 @@ fun WorkshopScreen(
                     ) { item ->
                         WorkshopListItem(
                             item = item,
+                            showSubscriptionState = state.showSubscriptionState,
                             autoResolveDownloadInfo = state.autoResolveDownloadInfo,
                             latestTask = state.downloadTasksByPublishedFileId[item.publishedFileId],
                             onClick = { viewModel.openItemDetails(item) },
@@ -378,6 +381,7 @@ fun WorkshopScreen(
             WorkshopDetailSheet(
                 item = item,
                 latestTask = state.downloadTasksByPublishedFileId[item.publishedFileId],
+                showSubscriptionState = state.showSubscriptionState,
                 downloadIdentityLabel = state.downloadIdentityLabel,
                 downloadIdentityDescription = state.downloadIdentityDescription,
                 isQueueing = state.queueingPublishedFileId == item.publishedFileId,
@@ -447,6 +451,8 @@ private fun WorkshopTopBarModern(
     onOpenSectionPicker: () -> Unit,
     onOpenSortPicker: () -> Unit,
     onOpenPeriodPicker: () -> Unit,
+    canOpenSubscriptions: Boolean,
+    onOpenSubscriptions: () -> Unit,
     onSwitchToBrowse: () -> Unit,
     onSearchTextChange: (String) -> Unit,
     onSubmitSearch: () -> Unit,
@@ -483,10 +489,10 @@ private fun WorkshopTopBarModern(
     }
 
     Surface(
-        shape = RoundedCornerShape(30.dp),
+        shape = RoundedCornerShape(26.dp),
         color = Color(0xFFF7F1EA).copy(alpha = 0.96f),
         tonalElevation = 2.dp,
-        shadowElevation = 8.dp,
+        shadowElevation = 6.dp,
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)),
     ) {
         Column(
@@ -501,13 +507,13 @@ private fun WorkshopTopBarModern(
                         ),
                     ),
                 )
-                .padding(horizontal = 16.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Top,
             ) {
                 CompactActionButton(
                     onClick = onBack,
@@ -517,51 +523,58 @@ private fun WorkshopTopBarModern(
                 )
                 Column(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Text(
-                        text = headerEyebrow,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = Color(0xFFB36B42),
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = headerEyebrow,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Color(0xFFB36B42),
+                        )
+                        if (headerMeta.isNotBlank()) {
+                            Text(
+                                text = headerMeta,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                     Text(
                         text = appName,
-                        style = MaterialTheme.typography.headlineSmall,
+                        style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
-                        maxLines = 2,
+                        maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (headerMeta.isNotBlank()) {
-                        Text(
-                            text = headerMeta,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
                     if (statusMessage != null) {
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(8.dp)
+                                    .size(6.dp)
                                     .background(Color(0xFFE28954), CircleShape),
                             )
                             Text(
                                 text = statusMessage,
-                                style = MaterialTheme.typography.bodySmall,
+                                style = MaterialTheme.typography.labelMedium,
                                 color = Color(0xFF9A5B38),
                             )
                         }
                     } else if (isSubscriptionMode) {
                         Text(
                             text = headerDescription,
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -578,18 +591,13 @@ private fun WorkshopTopBarModern(
                 )
             }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(Color.White.copy(alpha = 0.64f)),
-            )
-
             if (!isSubscriptionMode) {
                 OutlinedTextField(
                     value = searchText,
                     onValueChange = onSearchTextChange,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp),
                     singleLine = true,
                     placeholder = { Text("搜索创意工坊条目") },
                     leadingIcon = {
@@ -604,7 +612,7 @@ private fun WorkshopTopBarModern(
                     },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = { onSubmitSearch() }),
-                    shape = RoundedCornerShape(20.dp),
+                    shape = RoundedCornerShape(18.dp),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedContainerColor = Color.White.copy(alpha = 0.72f),
                         unfocusedContainerColor = Color.White.copy(alpha = 0.58f),
@@ -633,6 +641,12 @@ private fun WorkshopTopBarModern(
                         QuickFilterChip(
                             label = periodLabel(query.periodDays),
                             onClick = onOpenPeriodPicker,
+                        )
+                    }
+                    if (canOpenSubscriptions) {
+                        QuickFilterChip(
+                            label = "我的订阅",
+                            onClick = onOpenSubscriptions,
                         )
                     }
                     QuickFilterChip(
@@ -681,34 +695,36 @@ private fun WorkshopTopBarModern(
             } else {
                 Surface(
                     color = Color.White.copy(alpha = 0.62f),
-                    shape = RoundedCornerShape(22.dp),
+                    shape = RoundedCornerShape(18.dp),
                     border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 14.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(
                             modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
                             Text(
                                 text = "我的订阅",
-                                style = MaterialTheme.typography.titleSmall,
+                                style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.SemiBold,
                             )
                             Text(
                                 text = "这里只读取当前账号已订阅的条目，不会执行任何订阅变更。",
-                                style = MaterialTheme.typography.bodySmall,
+                                style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         OutlinedButton(
                             onClick = onSwitchToBrowse,
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(16.dp),
                         ) {
                             Text("浏览全部工坊")
                         }
@@ -727,13 +743,13 @@ private fun CompactActionButton(
 ) {
     Surface(
         modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(14.dp),
         color = Color.White.copy(alpha = 0.68f),
         border = BorderStroke(1.dp, Color.White.copy(alpha = 0.44f)),
         shadowElevation = 2.dp,
     ) {
         Box(
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
             contentAlignment = Alignment.Center,
         ) {
             icon()
@@ -766,14 +782,14 @@ private fun QuickFilterChip(
         ),
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             icon?.invoke()
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelMedium,
                 fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Medium,
                 color = if (highlighted) {
                     MaterialTheme.colorScheme.onPrimaryContainer
@@ -840,6 +856,7 @@ private fun QuickChoiceSheet(
 @Composable
 private fun WorkshopListItem(
     item: WorkshopItem,
+    showSubscriptionState: Boolean,
     autoResolveDownloadInfo: Boolean,
     latestTask: DownloadTaskEntity?,
     onClick: () -> Unit,
@@ -876,7 +893,7 @@ private fun WorkshopListItem(
                     .width(78.dp)
                     .height(50.dp),
                 shape = RoundedCornerShape(16.dp),
-                contentScale = ContentScale.Fit,
+                contentScale = ContentScale.Crop,
             )
 
             Column(
@@ -917,7 +934,7 @@ private fun WorkshopListItem(
                         containerColor = MaterialTheme.colorScheme.tertiaryContainer,
                         contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
                     )
-                    if (item.isSubscribed) {
+                    if (showSubscriptionState && item.isSubscribed) {
                         InfoPill(text = "已订阅")
                     }
                     latestTask?.let { task ->
@@ -1028,6 +1045,7 @@ private fun PaginationCard(
 private fun WorkshopDetailSheet(
     item: WorkshopItem,
     latestTask: DownloadTaskEntity?,
+    showSubscriptionState: Boolean,
     downloadIdentityLabel: String,
     downloadIdentityDescription: String,
     isQueueing: Boolean,
@@ -1082,7 +1100,7 @@ private fun WorkshopDetailSheet(
                         containerColor = Color.White.copy(alpha = 0.18f),
                         contentColor = Color.White,
                     )
-                    if (item.isSubscribed) {
+                    if (showSubscriptionState && item.isSubscribed) {
                         InfoPill(
                             text = "已订阅",
                             containerColor = Color.White.copy(alpha = 0.18f),

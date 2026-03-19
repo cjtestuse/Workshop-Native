@@ -58,6 +58,10 @@ data class SettingsUiState(
     val accountName: String = "",
     val avatarUrl: String? = null,
     val savedAccounts: List<SavedSteamAccount> = emptyList(),
+    val isLoginFeatureEnabled: Boolean = false,
+    val isLoggedInDownloadEnabled: Boolean = false,
+    val isOwnedGamesDisplayEnabled: Boolean = false,
+    val isSubscriptionDisplayEnabled: Boolean = false,
     val autoCheckAppUpdates: Boolean = true,
     val defaultGuestMode: Boolean = true,
     val downloadFolderName: String = DEFAULT_DOWNLOAD_FOLDER_NAME,
@@ -104,6 +108,10 @@ class SettingsViewModel @Inject constructor(
             accountName = accountName,
             avatarUrl = avatar,
             savedAccounts = prefs.savedAccounts,
+            isLoginFeatureEnabled = prefs.isLoginFeatureEnabled,
+            isLoggedInDownloadEnabled = prefs.isLoggedInDownloadEnabled,
+            isOwnedGamesDisplayEnabled = prefs.isOwnedGamesDisplayEnabled,
+            isSubscriptionDisplayEnabled = prefs.isSubscriptionDisplayEnabled,
             autoCheckAppUpdates = prefs.autoCheckAppUpdates,
             defaultGuestMode = prefs.defaultGuestMode,
             downloadFolderName = prefs.downloadFolderName,
@@ -172,6 +180,69 @@ class SettingsViewModel @Inject constructor(
     fun saveDefaultGuestMode(enabled: Boolean) {
         viewModelScope.launch {
             preferencesStore.saveDefaultGuestMode(enabled)
+        }
+    }
+
+    fun saveLoginFeatureEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveLoginFeatureEnabled(enabled)
+            if (!enabled) {
+                downloadsRepository.enforceAnonymousOnly("已关闭登录功能，涉及账号的下载任务已停止")
+                steamRepository.logout()
+                avatarUrl.value = null
+            }
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启登录功能。后续是否显示已购、订阅和登录后下载，仍需单独打开。"
+                } else {
+                    "已关闭登录功能。当前只保留匿名能力，登录恢复、已保存账号和账号型下载已收起。"
+                },
+            )
+        }
+    }
+
+    fun saveLoggedInDownloadEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveLoggedInDownloadEnabled(enabled)
+            if (!enabled) {
+                downloadsRepository.enforceAnonymousOnly("已关闭“登录后下载”，涉及账号的下载任务已停止")
+            }
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启“登录后下载”。只有需要账号下载的场景才会使用当前登录态。"
+                } else {
+                    "已关闭“登录后下载”。后续下载只会走匿名能力。"
+                },
+            )
+        }
+    }
+
+    fun saveOwnedGamesDisplayEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveOwnedGamesDisplayEnabled(enabled)
+            if (!enabled) {
+                steamRepository.clearOwnedGamesCache()
+            }
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启“用户已购买标识展示”。"
+                } else {
+                    "已关闭“用户已购买标识展示”，并清除了本地已购缓存。"
+                },
+            )
+        }
+    }
+
+    fun saveSubscriptionDisplayEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveSubscriptionDisplayEnabled(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启“用户已订阅展示”。"
+                } else {
+                    "已关闭“用户已订阅展示”。"
+                },
+            )
         }
     }
 

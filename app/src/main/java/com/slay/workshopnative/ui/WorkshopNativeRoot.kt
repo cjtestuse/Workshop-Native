@@ -89,29 +89,39 @@ private enum class RootTab(val route: String) {
 }
 
 @Composable
-private fun rootDestinations(): List<RootDestination> {
-    return listOf(
-        RootDestination(
-            route = RootTab.Explore.route,
-            label = "探索",
-            icon = { Icon(Icons.Rounded.TravelExplore, contentDescription = null) },
-        ),
-        RootDestination(
-            route = RootTab.Library.route,
-            label = "我的内容",
-            icon = { Icon(Icons.Rounded.Games, contentDescription = null) },
-        ),
-        RootDestination(
-            route = RootTab.Downloads.route,
-            label = "下载",
-            icon = { Icon(Icons.Rounded.DownloadForOffline, contentDescription = null) },
-        ),
-        RootDestination(
-            route = RootTab.Settings.route,
-            label = "设置",
-            icon = { Icon(Icons.Rounded.Settings, contentDescription = null) },
-        ),
-    )
+private fun rootDestinations(showLibraryTab: Boolean): List<RootDestination> {
+    return buildList {
+        add(
+            RootDestination(
+                route = RootTab.Explore.route,
+                label = "探索",
+                icon = { Icon(Icons.Rounded.TravelExplore, contentDescription = null) },
+            ),
+        )
+        if (showLibraryTab) {
+            add(
+                RootDestination(
+                    route = RootTab.Library.route,
+                    label = "我的内容",
+                    icon = { Icon(Icons.Rounded.Games, contentDescription = null) },
+                ),
+            )
+        }
+        add(
+            RootDestination(
+                route = RootTab.Downloads.route,
+                label = "下载",
+                icon = { Icon(Icons.Rounded.DownloadForOffline, contentDescription = null) },
+            ),
+        )
+        add(
+            RootDestination(
+                route = RootTab.Settings.route,
+                label = "设置",
+                icon = { Icon(Icons.Rounded.Settings, contentDescription = null) },
+            ),
+        )
+    }
 }
 
 @Composable
@@ -124,6 +134,8 @@ fun WorkshopNativeRoot(
     val isBootstrapping by viewModel.isBootstrapping.collectAsStateWithLifecycle()
     val guestMode by viewModel.guestMode.collectAsStateWithLifecycle()
     val savedAccounts by viewModel.savedAccounts.collectAsStateWithLifecycle()
+    val isLoginFeatureEnabled by viewModel.isLoginFeatureEnabled.collectAsStateWithLifecycle()
+    val showLibraryTab by viewModel.showLibraryTab.collectAsStateWithLifecycle()
     val appUpdateState by viewModel.appUpdateState.collectAsStateWithLifecycle()
     val hasAcknowledgedDisclaimer by viewModel.hasAcknowledgedDisclaimer.collectAsStateWithLifecycle()
     val hasAcknowledgedUsageBoundary by viewModel.hasAcknowledgedUsageBoundary.collectAsStateWithLifecycle()
@@ -158,12 +170,12 @@ fun WorkshopNativeRoot(
         }
     }
 
-    LaunchedEffect(sessionState.status) {
+    LaunchedEffect(sessionState.status, showLibraryTab) {
         when (sessionState.status) {
             SessionStatus.Authenticated -> {
                 appUnlocked = true
                 forceLoginScreen = false
-                if (currentRootTabRoute == RootTab.Explore.route) {
+                if (showLibraryTab && currentRootTabRoute == RootTab.Explore.route) {
                     currentRootTabRoute = RootTab.Library.route
                 }
             }
@@ -179,16 +191,31 @@ fun WorkshopNativeRoot(
         }
     }
 
+    LaunchedEffect(showLibraryTab) {
+        if (!showLibraryTab && currentRootTabRoute == RootTab.Library.route) {
+            currentRootTabRoute = RootTab.Explore.route
+        }
+    }
+
+    LaunchedEffect(isLoginFeatureEnabled) {
+        if (!isLoginFeatureEnabled) {
+            forceLoginScreen = false
+        }
+    }
+
     val hasRememberedAccount = sessionState.account?.steamId64?.let { it > 0L } == true
-    val showApplicationShell = guestMode ||
+    val showApplicationShell = !isLoginFeatureEnabled ||
+        guestMode ||
         appUnlocked ||
         sessionState.status == SessionStatus.Authenticated ||
-        (sessionState.isRestoring && hasRememberedAccount)
-    val showStartupOverlay = !showApplicationShell &&
+        (isLoginFeatureEnabled && sessionState.isRestoring && hasRememberedAccount)
+    val showStartupOverlay = isLoginFeatureEnabled &&
+        !showApplicationShell &&
         !forceLoginScreen &&
         isBootstrapping &&
         sessionState.status == SessionStatus.Idle
-    val showRestoreScreen = !showApplicationShell &&
+    val showRestoreScreen = isLoginFeatureEnabled &&
+        !showApplicationShell &&
         !forceLoginScreen &&
         !showStartupOverlay &&
         (
@@ -264,7 +291,10 @@ fun WorkshopNativeRoot(
         )
     }
     val showBottomBar = activeWorkshop == null
-    val showSessionBanner = showApplicationShell && !guestMode && sessionState.status == SessionStatus.Error
+    val showSessionBanner = showApplicationShell &&
+        isLoginFeatureEnabled &&
+        !guestMode &&
+        sessionState.status == SessionStatus.Error
     val sessionBannerPadding = when {
         !showSessionBanner -> 0.dp
         else -> 76.dp
@@ -286,7 +316,7 @@ fun WorkshopNativeRoot(
             bottomBar = {
                 if (!showBottomBar) return@Scaffold
                 RootBottomBar(
-                    destinations = rootDestinations(),
+                    destinations = rootDestinations(showLibraryTab),
                     currentRoute = currentRootTab.route,
                     onNavigate = { route -> currentRootTabRoute = route },
                 )

@@ -8,6 +8,7 @@ import com.slay.workshopnative.data.model.FavoriteWorkshopGame
 import com.slay.workshopnative.data.model.GameDetails
 import com.slay.workshopnative.data.model.OwnedGame
 import com.slay.workshopnative.data.model.SessionStatus
+import com.slay.workshopnative.data.preferences.UserPreferencesStore
 import com.slay.workshopnative.data.repository.SteamRepository
 import com.slay.workshopnative.data.repository.WorkshopFavoritesRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -22,6 +23,9 @@ import kotlinx.coroutines.launch
 data class LibraryUiState(
     val isLoading: Boolean = false,
     val hasLoadedOnce: Boolean = false,
+    val isLoginFeatureEnabled: Boolean = false,
+    val isOwnedGamesDisplayEnabled: Boolean = false,
+    val isSubscriptionDisplayEnabled: Boolean = false,
     val games: List<OwnedGame> = emptyList(),
     val query: String = "",
     val errorMessage: String? = null,
@@ -34,6 +38,7 @@ data class LibraryUiState(
 class LibraryViewModel @Inject constructor(
     private val steamRepository: SteamRepository,
     private val favoritesRepository: WorkshopFavoritesRepository,
+    private val preferencesStore: UserPreferencesStore,
 ) : ViewModel() {
     private companion object {
         const val LOG_TAG = "LibraryViewModel"
@@ -41,10 +46,15 @@ class LibraryViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(LibraryUiState())
     val uiState: StateFlow<LibraryUiState> = _uiState.asStateFlow()
+    private var isLoginFeatureEnabled = false
+    private var isOwnedGamesDisplayEnabled = false
+    private var isSubscriptionDisplayEnabled = false
+    private var currentSessionStatus = SessionStatus.Idle
 
     init {
         preloadSnapshot()
         observeFavorites()
+        observePreferences()
         observeSession()
     }
 
@@ -70,6 +80,10 @@ class LibraryViewModel @Inject constructor(
     fun refresh() = refresh(forceRefresh = true)
 
     fun refresh(forceRefresh: Boolean) {
+        if (!canDisplayOwnedGames()) {
+            clearLibraryContent()
+            return
+        }
         if (_uiState.value.isLoading) return
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, errorMessage = null) }
@@ -101,6 +115,7 @@ class LibraryViewModel @Inject constructor(
     }
 
     fun loadGameDetails(appId: Int) {
+        if (!canDisplayOwnedGames()) return
         if (_uiState.value.gameDetailsByAppId.containsKey(appId)) return
         if (_uiState.value.loadingDetailsAppId == appId) return
         viewModelScope.launch {
@@ -122,6 +137,7 @@ class LibraryViewModel @Inject constructor(
 
     private fun preloadSnapshot() {
         viewModelScope.launch {
+            if (!canDisplayOwnedGames()) return@launch
             steamRepository.loadOwnedGamesSnapshot()
                 .onSuccess { games ->
                     if (games.isEmpty()) return@onSuccess
@@ -139,13 +155,43 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
+    private fun observePreferences() {
+        viewModelScope.launch {
+            preferencesStore.preferences.collectLatest { prefs ->
+                val wasLibraryVisible = canDisplayOwnedGames()
+                isLoginFeatureEnabled = prefs.isLoginFeatureEnabled
+                isOwnedGamesDisplayEnabled = prefs.isOwnedGamesDisplayEnabled
+                isSubscriptionDisplayEnabled = prefs.isSubscriptionDisplayEnabled
+                val isLibraryVisible = canDisplayOwnedGames()
+                _uiState.update {
+                    it.copy(
+                        isLoginFeatureEnabled = isLoginFeatureEnabled,
+                        isOwnedGamesDisplayEnabled = isOwnedGamesDisplayEnabled,
+                        isSubscriptionDisplayEnabled = canShowSubscriptions(),
+                    )
+                }
+                if (!isLibraryVisible) {
+                    clearLibraryContent()
+                    return@collectLatest
+                }
+                if (!wasLibraryVisible) {
+                    preloadSnapshot()
+                    if (currentSessionStatus == SessionStatus.Authenticated) {
+                        refresh(forceRefresh = false)
+                    }
+                }
+            }
+        }
+    }
+
     private fun observeSession() {
         viewModelScope.launch {
             var lastConnectionRevision = -1L
             steamRepository.sessionState.collectLatest { session ->
+                currentSessionStatus = session.status
                 val isAuthenticated = session.status == SessionStatus.Authenticated
                 val currentRevision = session.connectionRevision
-                if (isAuthenticated && currentRevision != lastConnectionRevision) {
+                if (isAuthenticated && canDisplayOwnedGames() && currentRevision != lastConnectionRevision) {
                     lastConnectionRevision = currentRevision
                     refresh(forceRefresh = false)
                 }
@@ -159,5 +205,29 @@ class LibraryViewModel @Inject constructor(
                 _uiState.update { it.copy(favoriteGames = favorites) }
             }
         }
+    }
+
+    private fun clearLibraryContent() {
+        _uiState.update {
+            it.copy(
+                isLoading = false,
+                hasLoadedOnce = false,
+                games = emptyList(),
+                errorMessage = null,
+                gameDetailsByAppId = emptyMap(),
+                loadingDetailsAppId = null,
+                isLoginFeatureEnabled = isLoginFeatureEnabled,
+                isOwnedGamesDisplayEnabled = isOwnedGamesDisplayEnabled,
+                isSubscriptionDisplayEnabled = canShowSubscriptions(),
+            )
+        }
+    }
+
+    private fun canDisplayOwnedGames(): Boolean {
+        return isLoginFeatureEnabled && isOwnedGamesDisplayEnabled
+    }
+
+    private fun canShowSubscriptions(): Boolean {
+        return canDisplayOwnedGames() && isSubscriptionDisplayEnabled
     }
 }

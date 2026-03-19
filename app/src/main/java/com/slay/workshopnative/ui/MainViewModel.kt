@@ -73,6 +73,12 @@ class MainViewModel @Inject constructor(
     val savedAccounts: StateFlow<List<SavedSteamAccount>> = preferencesStore.preferences
         .map { it.savedAccounts }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val isLoginFeatureEnabled: StateFlow<Boolean> = preferencesStore.preferences
+        .map { it.isLoginFeatureEnabled }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+    val showLibraryTab: StateFlow<Boolean> = preferencesStore.preferences
+        .map { prefs -> prefs.isLoginFeatureEnabled && prefs.isOwnedGamesDisplayEnabled }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     init {
         viewModelScope.launch {
@@ -83,7 +89,7 @@ class MainViewModel @Inject constructor(
                 AppLog.w(LOG_TAG, "bootstrap failed", error)
             }
             val currentStatus = steamRepository.sessionState.value.status
-            if (prefs.defaultGuestMode && currentStatus != SessionStatus.Authenticated) {
+            if ((!prefs.isLoginFeatureEnabled || prefs.defaultGuestMode) && currentStatus != SessionStatus.Authenticated) {
                 _guestMode.value = true
             }
             if (currentStatus != SessionStatus.Authenticated) {
@@ -97,6 +103,26 @@ class MainViewModel @Inject constructor(
                     _guestMode.value = false
                 }
             }
+        }
+        viewModelScope.launch {
+            preferencesStore.preferences
+                .map { prefs -> prefs.isLoginFeatureEnabled to prefs.isLoggedInDownloadEnabled }
+                .distinctUntilChanged()
+                .collectLatest { (loginEnabled, loggedInDownloadEnabled) ->
+                    if (!loginEnabled && steamRepository.sessionState.value.status == SessionStatus.Authenticated) {
+                        steamRepository.logout()
+                    }
+                    if (!loginEnabled || !loggedInDownloadEnabled) {
+                        _guestMode.value = true
+                        downloadsRepository.enforceAnonymousOnly(
+                            if (!loginEnabled) {
+                                "已关闭登录功能，涉及账号的下载任务已停止"
+                            } else {
+                                "已关闭“登录后下载”，涉及账号的下载任务已停止"
+                            },
+                        )
+                    }
+                }
         }
         viewModelScope.launch {
             steamRepository.sessionState

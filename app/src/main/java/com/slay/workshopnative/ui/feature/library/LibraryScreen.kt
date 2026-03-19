@@ -87,6 +87,7 @@ fun LibraryScreen(
     val filteredFavoriteGames = state.favoriteGames.filter { game ->
         state.query.isBlank() || game.name.contains(state.query, ignoreCase = true)
     }
+    val showSubscriptionEntry = state.isSubscriptionDisplayEnabled
     val favoriteAppIds = state.favoriteGames.mapTo(linkedSetOf(), FavoriteWorkshopGame::appId)
     val ownedGames = filteredGames.filterNot(OwnedGame::isFamilyShared)
     val sharedGames = filteredGames.filter(OwnedGame::isFamilyShared)
@@ -118,6 +119,29 @@ fun LibraryScreen(
         )
 
         when {
+            !state.isLoginFeatureEnabled || !state.isOwnedGamesDisplayEnabled -> {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shape = RoundedCornerShape(24.dp),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(
+                            text = "当前已关闭账号游戏库展示。",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        Text(
+                            text = "请先在设置页打开“账户行为 > 打开用户登录功能”和“用户已购买标识展示”，再查看已购与家庭共享游戏。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+
             (state.isLoading || !state.hasLoadedOnce) && state.games.isEmpty() -> {
                 LibraryLoadingCard(accountName = accountName)
             }
@@ -192,6 +216,7 @@ fun LibraryScreen(
                             viewModel.markWorkshopOpened(game.appId)
                             onOpenSubscriptions(game.appId, game.name)
                         },
+                        showSubscriptionEntry = showSubscriptionEntry,
                     )
                     gamesSection(
                         title = "已购买",
@@ -220,6 +245,7 @@ fun LibraryScreen(
                             viewModel.markWorkshopOpened(game.appId)
                             onOpenSubscriptions(game.appId, game.name)
                         },
+                        showSubscriptionEntry = showSubscriptionEntry,
                     )
                     gamesSection(
                         title = "家庭共享",
@@ -248,6 +274,7 @@ fun LibraryScreen(
                             viewModel.markWorkshopOpened(game.appId)
                             onOpenSubscriptions(game.appId, game.name)
                         },
+                        showSubscriptionEntry = showSubscriptionEntry,
                     )
                 }
             }
@@ -281,6 +308,7 @@ fun LibraryScreen(
                     viewModel.markWorkshopOpened(game.appId)
                     onOpenSubscriptions(game.appId, game.name)
                 },
+                showSubscriptionEntry = showSubscriptionEntry,
             )
         }
     }
@@ -449,6 +477,7 @@ private fun LazyListScope.gamesSection(
     onToggleFavorite: (OwnedGame) -> Unit,
     onOpenWorkshop: (OwnedGame) -> Unit,
     onOpenSubscriptions: (OwnedGame) -> Unit,
+    showSubscriptionEntry: Boolean,
 ) {
     if (games.isEmpty()) return
     item(key = "section_$title") {
@@ -465,6 +494,7 @@ private fun LazyListScope.gamesSection(
             onToggleFavorite = { onToggleFavorite(game) },
             onOpenWorkshop = { onOpenWorkshop(game) },
             onOpenSubscriptions = { onOpenSubscriptions(game) },
+            showSubscriptionEntry = showSubscriptionEntry,
         )
     }
 }
@@ -475,6 +505,7 @@ private fun LazyListScope.favoriteGamesSection(
     onToggleFavorite: (FavoriteWorkshopGame) -> Unit,
     onOpenWorkshop: (FavoriteWorkshopGame) -> Unit,
     onOpenSubscriptions: (FavoriteWorkshopGame) -> Unit,
+    showSubscriptionEntry: Boolean,
 ) {
     if (games.isEmpty()) return
     item(key = "section_favorites") {
@@ -490,6 +521,7 @@ private fun LazyListScope.favoriteGamesSection(
             onToggleFavorite = { onToggleFavorite(game) },
             onOpenWorkshop = { onOpenWorkshop(game) },
             onOpenSubscriptions = { onOpenSubscriptions(game) },
+            showSubscriptionEntry = showSubscriptionEntry,
         )
     }
 }
@@ -528,6 +560,7 @@ private fun GameRow(
     onToggleFavorite: () -> Unit,
     onOpenWorkshop: () -> Unit,
     onOpenSubscriptions: () -> Unit,
+    showSubscriptionEntry: Boolean,
 ) {
     Card(
         shape = RoundedCornerShape(24.dp),
@@ -611,10 +644,12 @@ private fun GameRow(
                             },
                         )
                     }
-                    SecondaryActionCapsule(
-                        text = "我的订阅",
-                        onClick = onOpenSubscriptions,
-                    )
+                    if (showSubscriptionEntry) {
+                        SecondaryActionCapsule(
+                            text = "我的订阅",
+                            onClick = onOpenSubscriptions,
+                        )
+                    }
                     ActionCapsule(
                         text = "进入工坊",
                         onClick = onOpenWorkshop,
@@ -634,6 +669,7 @@ private fun GameDetailsSheet(
     onToggleFavorite: () -> Unit,
     onOpenWorkshop: () -> Unit,
     onOpenSubscriptions: () -> Unit,
+    showSubscriptionEntry: Boolean,
 ) {
     Column(
         modifier = Modifier
@@ -793,11 +829,13 @@ private fun GameDetailsSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                OutlinedButton(
-                    onClick = onOpenSubscriptions,
-                    shape = RoundedCornerShape(20.dp),
-                ) {
-                    Text("我的订阅")
+                if (showSubscriptionEntry) {
+                    OutlinedButton(
+                        onClick = onOpenSubscriptions,
+                        shape = RoundedCornerShape(20.dp),
+                    ) {
+                        Text("我的订阅")
+                    }
                 }
                 Button(
                     onClick = onOpenWorkshop,
@@ -824,6 +862,7 @@ private fun FavoriteWorkshopRow(
     onToggleFavorite: () -> Unit,
     onOpenWorkshop: () -> Unit,
     onOpenSubscriptions: () -> Unit,
+    showSubscriptionEntry: Boolean,
 ) {
     Card(
         shape = RoundedCornerShape(24.dp),
@@ -890,10 +929,12 @@ private fun FavoriteWorkshopRow(
                             tint = MaterialTheme.colorScheme.primary,
                         )
                     }
-                    SecondaryActionCapsule(
-                        text = "我的订阅",
-                        onClick = onOpenSubscriptions,
-                    )
+                    if (showSubscriptionEntry) {
+                        SecondaryActionCapsule(
+                            text = "我的订阅",
+                            onClick = onOpenSubscriptions,
+                        )
+                    }
                     ActionCapsule(
                         text = "进入工坊",
                         onClick = onOpenWorkshop,

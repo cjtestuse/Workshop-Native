@@ -44,6 +44,11 @@ data class WorkshopUiState(
     val tagGroups: List<WorkshopBrowseTagGroup> = emptyList(),
     val supportsIncompatibleFilter: Boolean = false,
     val autoResolveDownloadInfo: Boolean = false,
+    val isLoginFeatureEnabled: Boolean = false,
+    val isLoggedInDownloadEnabled: Boolean = false,
+    val isSubscriptionDisplayEnabled: Boolean = false,
+    val canOpenSubscriptions: Boolean = false,
+    val showSubscriptionState: Boolean = false,
     val downloadIdentityLabel: String = "匿名下载",
     val downloadIdentityDescription: String = "当前未登录，将直接按匿名方式尝试公开下载。",
     val selectedItem: WorkshopItem? = null,
@@ -70,6 +75,9 @@ class WorkshopViewModel @Inject constructor(
     private val metadataRequestsInFlight = mutableSetOf<Long>()
     private var workshopPageSize = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE
     private var autoResolveDownloadInfo = true
+    private var isLoginFeatureEnabled = false
+    private var isLoggedInDownloadEnabled = false
+    private var isSubscriptionDisplayEnabled = false
     private var preferAnonymousDownloads = true
     private var allowAuthenticatedFallback = true
     private var currentSessionStatus = SessionStatus.Idle
@@ -84,14 +92,33 @@ class WorkshopViewModel @Inject constructor(
         observeDownloads()
     }
 
-    fun bindApp(appId: Int, appName: String, launchMode: WorkshopLaunchMode) {
+    fun bindApp(
+        appId: Int,
+        appName: String,
+        launchMode: WorkshopLaunchMode,
+        noticeMessage: String? = null,
+    ) {
         val decodedAppName = Uri.decode(appName)
+        val effectiveLaunchMode = requestedLaunchMode(launchMode)
+        val blockedMessage = if (effectiveLaunchMode != launchMode) {
+            subscriptionsUnavailableMessage()
+        } else {
+            noticeMessage
+        }
         val currentState = _uiState.value
         if (
             currentState.appId == appId &&
             currentState.appName == decodedAppName &&
-            currentState.launchMode == launchMode
+            currentState.launchMode == effectiveLaunchMode
         ) {
+            if (!blockedMessage.isNullOrBlank()) {
+                _uiState.update {
+                    it.copy(
+                        errorMessage = null,
+                        actionMessage = blockedMessage,
+                    )
+                }
+            }
             return
         }
 
@@ -101,14 +128,14 @@ class WorkshopViewModel @Inject constructor(
             it.copy(
                 appId = appId,
                 appName = decodedAppName,
-                launchMode = launchMode,
+                launchMode = effectiveLaunchMode,
                 isRefreshing = false,
                 isLoadingMore = false,
                 hasLoadedOnce = false,
                 isResolvingSelection = false,
                 items = emptyList(),
                 query = WorkshopBrowseQuery(
-                    sectionKey = if (launchMode == WorkshopLaunchMode.Subscriptions) {
+                    sectionKey = if (effectiveLaunchMode == WorkshopLaunchMode.Subscriptions) {
                         WorkshopBrowseQuery.SECTION_MY_SUBSCRIPTIONS
                     } else {
                         WorkshopBrowseQuery.SECTION_ITEMS
@@ -117,7 +144,7 @@ class WorkshopViewModel @Inject constructor(
                 ),
                 totalCount = 0,
                 hasMore = false,
-                sectionOptions = if (launchMode == WorkshopLaunchMode.Subscriptions) {
+                sectionOptions = if (effectiveLaunchMode == WorkshopLaunchMode.Subscriptions) {
                     listOf(
                         WorkshopBrowseSectionOption(
                             key = WorkshopBrowseQuery.SECTION_MY_SUBSCRIPTIONS,
@@ -132,14 +159,29 @@ class WorkshopViewModel @Inject constructor(
                 tagGroups = emptyList(),
                 supportsIncompatibleFilter = false,
                 autoResolveDownloadInfo = autoResolveDownloadInfo,
+                isLoginFeatureEnabled = isLoginFeatureEnabled,
+                isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
+                isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
+                canOpenSubscriptions = canUseSubscriptionFeatures(),
+                showSubscriptionState = canUseSubscriptionFeatures(),
                 selectedItem = null,
                 queueingPublishedFileId = null,
                 errorMessage = null,
-                actionMessage = null,
+                actionMessage = blockedMessage,
             )
         }
 
         refresh(forceRefresh = false)
+    }
+
+    fun openSubscriptionsMode() {
+        val state = _uiState.value
+        if (state.appId <= 0) return
+        bindApp(
+            appId = state.appId,
+            appName = state.appName,
+            launchMode = WorkshopLaunchMode.Subscriptions,
+        )
     }
 
     fun switchToBrowseMode() {
@@ -406,16 +448,34 @@ class WorkshopViewModel @Inject constructor(
             preferencesStore.preferences.collectLatest { prefs ->
                 val nextPageSize = prefs.workshopPageSize
                 val nextAutoResolve = prefs.workshopAutoResolveVisibleItems
+                isLoginFeatureEnabled = prefs.isLoginFeatureEnabled
+                isLoggedInDownloadEnabled = prefs.isLoggedInDownloadEnabled
+                isSubscriptionDisplayEnabled = prefs.isSubscriptionDisplayEnabled
                 preferAnonymousDownloads = prefs.preferAnonymousDownloads
                 allowAuthenticatedFallback = prefs.allowAuthenticatedDownloadFallback
                 val current = _uiState.value
                 val pageSizeChanged = workshopPageSize != nextPageSize
                 val autoResolveChanged = autoResolveDownloadInfo != nextAutoResolve
+                val subscriptionModeBlocked = current.launchMode == WorkshopLaunchMode.Subscriptions &&
+                    !canUseSubscriptionFeatures()
                 if (!pageSizeChanged && !autoResolveChanged) {
                     _uiState.update {
                         it.copy(
+                            isLoginFeatureEnabled = isLoginFeatureEnabled,
+                            isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
+                            isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
+                            canOpenSubscriptions = canUseSubscriptionFeatures(),
+                            showSubscriptionState = canUseSubscriptionFeatures(),
                             downloadIdentityLabel = downloadIdentityLabel(),
                             downloadIdentityDescription = downloadIdentityDescription(),
+                        )
+                    }
+                    if (subscriptionModeBlocked && current.appId > 0) {
+                        bindApp(
+                            appId = current.appId,
+                            appName = current.appName,
+                            launchMode = WorkshopLaunchMode.Browse,
+                            noticeMessage = subscriptionsUnavailableMessage(),
                         )
                     }
                     return@collectLatest
@@ -432,9 +492,24 @@ class WorkshopViewModel @Inject constructor(
                             state.query
                         },
                         autoResolveDownloadInfo = nextAutoResolve,
+                        isLoginFeatureEnabled = isLoginFeatureEnabled,
+                        isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
+                        isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
+                        canOpenSubscriptions = canUseSubscriptionFeatures(),
+                        showSubscriptionState = canUseSubscriptionFeatures(),
                         downloadIdentityLabel = downloadIdentityLabel(),
                         downloadIdentityDescription = downloadIdentityDescription(),
                     )
+                }
+
+                if (subscriptionModeBlocked && current.appId > 0) {
+                    bindApp(
+                        appId = current.appId,
+                        appName = current.appName,
+                        launchMode = WorkshopLaunchMode.Browse,
+                        noticeMessage = subscriptionsUnavailableMessage(),
+                    )
+                    return@collectLatest
                 }
 
                 if (pageSizeChanged && current.appId > 0 && current.hasLoadedOnce) {
@@ -475,9 +550,25 @@ class WorkshopViewModel @Inject constructor(
                 currentAccountName = session.account?.accountName.orEmpty()
                 _uiState.update {
                     it.copy(
+                        canOpenSubscriptions = canUseSubscriptionFeatures(),
+                        showSubscriptionState = canUseSubscriptionFeatures(),
                         downloadIdentityLabel = downloadIdentityLabel(),
                         downloadIdentityDescription = downloadIdentityDescription(),
                     )
+                }
+                val currentState = _uiState.value
+                if (
+                    currentState.appId > 0 &&
+                    currentState.launchMode == WorkshopLaunchMode.Subscriptions &&
+                    !canUseSubscriptionFeatures()
+                ) {
+                    bindApp(
+                        appId = currentState.appId,
+                        appName = currentState.appName,
+                        launchMode = WorkshopLaunchMode.Browse,
+                        noticeMessage = subscriptionsUnavailableMessage(),
+                    )
+                    return@collectLatest
                 }
                 val isAuthenticated = session.status == SessionStatus.Authenticated
                 val currentRevision = session.connectionRevision
@@ -602,6 +693,8 @@ class WorkshopViewModel @Inject constructor(
 
     private fun downloadIdentityLabel(): String {
         return when {
+            !isLoginFeatureEnabled -> "匿名下载"
+            !isLoggedInDownloadEnabled -> "匿名下载"
             currentSessionStatus != SessionStatus.Authenticated -> "匿名下载"
             preferAnonymousDownloads -> currentAccountName.ifBlank { "已登录账号" }.let { "匿名优先·$it" }
             else -> currentAccountName.ifBlank { "已登录账号" }.let { "账号下载·$it" }
@@ -610,6 +703,10 @@ class WorkshopViewModel @Inject constructor(
 
     private fun downloadIdentityDescription(): String {
         return when {
+            !isLoginFeatureEnabled ->
+                "已在设置中关闭登录功能，当前只允许匿名下载公开内容。"
+            !isLoggedInDownloadEnabled ->
+                "已在设置中关闭“登录后下载”，即使账号已登录也只会匿名下载公开内容。"
             currentSessionStatus != SessionStatus.Authenticated ->
                 "当前未登录，将直接按匿名方式尝试公开下载。"
             preferAnonymousDownloads && allowAuthenticatedFallback ->
@@ -618,6 +715,29 @@ class WorkshopViewModel @Inject constructor(
                 "会优先尝试匿名方式；若匿名不可用，不会自动切换到当前 Steam 账号。"
             else ->
                 "当前会直接使用 ${currentAccountName.ifBlank { "已登录账号" }} 进行下载。"
+        }
+    }
+
+    private fun requestedLaunchMode(launchMode: WorkshopLaunchMode): WorkshopLaunchMode {
+        return if (launchMode == WorkshopLaunchMode.Subscriptions && !canUseSubscriptionFeatures()) {
+            WorkshopLaunchMode.Browse
+        } else {
+            launchMode
+        }
+    }
+
+    private fun canUseSubscriptionFeatures(): Boolean {
+        return isLoginFeatureEnabled &&
+            isSubscriptionDisplayEnabled &&
+            currentSessionStatus == SessionStatus.Authenticated
+    }
+
+    private fun subscriptionsUnavailableMessage(): String {
+        return when {
+            !isLoginFeatureEnabled -> "已在设置中关闭登录功能，当前无法读取我的订阅。"
+            !isSubscriptionDisplayEnabled -> "已在设置中关闭“用户已订阅展示”，当前改为浏览全部工坊。"
+            currentSessionStatus != SessionStatus.Authenticated -> "当前未登录，无法读取我的订阅。"
+            else -> "当前无法读取我的订阅。"
         }
     }
 }

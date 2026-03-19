@@ -45,6 +45,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -105,6 +106,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var activeDestination by remember { mutableStateOf<SettingsDestination?>(null) }
+    var showLoginRiskDialog by remember { mutableStateOf(false) }
     val openExternalUrl: (String) -> Unit = { url ->
         if (!context.openUrlWithChooser(url, chooserTitle = "选择浏览器")) {
             Toast.makeText(context, "未找到可打开链接的浏览器", Toast.LENGTH_SHORT).show()
@@ -145,6 +147,79 @@ fun SettingsScreen(
                 onSwitchSavedAccount = onSwitchSavedAccount,
                 onRemoveSavedAccount = viewModel::removeSavedAccount,
             )
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsSectionHeader(
+                    title = "账户行为",
+                    subtitle = "默认只保留匿名能力，所有 Steam 账号相关能力都需要你主动打开。",
+                )
+                SettingsPanel {
+                    SettingsBooleanRow(
+                        title = "打开用户登录功能",
+                        description = if (uiState.isLoginFeatureEnabled) {
+                            "当前已允许显示登录入口、已保存账号和 Steam 会话恢复。"
+                        } else {
+                            "当前已关闭。应用只保留匿名访问，不展示登录入口，也不会恢复已保存登录态。"
+                        },
+                        checked = uiState.isLoginFeatureEnabled,
+                        onCheckedChange = { enabled ->
+                            if (enabled && !uiState.isLoginFeatureEnabled) {
+                                showLoginRiskDialog = true
+                            } else if (!enabled) {
+                                viewModel.saveLoginFeatureEnabled(false)
+                            }
+                        },
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+                    SettingsSubsectionTitle(
+                        title = "用户信息获取",
+                        subtitle = "下面 3 个能力彼此独立，默认全部关闭。",
+                    )
+                    SettingsBooleanRow(
+                        title = "登录后下载",
+                        description = if (!uiState.isLoginFeatureEnabled) {
+                            "需先打开“用户登录功能”。未开启前，下载只允许匿名方式。"
+                        } else if (uiState.isLoggedInDownloadEnabled) {
+                            "当前已开启。条目需要账号时，才允许使用当前 Steam 登录态下载。"
+                        } else {
+                            "当前已关闭。即使已登录，也只允许匿名下载。"
+                        },
+                        checked = uiState.isLoggedInDownloadEnabled,
+                        enabled = uiState.isLoginFeatureEnabled,
+                        onCheckedChange = viewModel::saveLoggedInDownloadEnabled,
+                    )
+                    SettingsBooleanRow(
+                        title = "用户已购买标识展示",
+                        description = if (!uiState.isLoginFeatureEnabled) {
+                            "需先打开“用户登录功能”。未开启前，不展示已购与家庭共享信息。"
+                        } else if (uiState.isOwnedGamesDisplayEnabled) {
+                            "当前已开启。会显示“我的内容”、已购游戏和家庭共享信息。"
+                        } else {
+                            "当前已关闭。不展示已购与家庭共享信息，也不保留相关入口。"
+                        },
+                        checked = uiState.isOwnedGamesDisplayEnabled,
+                        enabled = uiState.isLoginFeatureEnabled,
+                        onCheckedChange = viewModel::saveOwnedGamesDisplayEnabled,
+                    )
+                    SettingsBooleanRow(
+                        title = "用户已订阅展示",
+                        description = if (!uiState.isLoginFeatureEnabled) {
+                            "需先打开“用户登录功能”。未开启前，不展示当前账号的订阅状态。"
+                        } else if (uiState.isSubscriptionDisplayEnabled) {
+                            "当前已开启。会显示“我的订阅”入口和当前账号的订阅标识。"
+                        } else {
+                            "当前已关闭。不展示“已订阅”标识，也不展示“我的订阅”入口。"
+                        },
+                        checked = uiState.isSubscriptionDisplayEnabled,
+                        enabled = uiState.isLoginFeatureEnabled,
+                        onCheckedChange = viewModel::saveSubscriptionDisplayEnabled,
+                    )
+                }
+            }
         }
 
         item {
@@ -199,7 +274,13 @@ fun SettingsScreen(
                         summary = buildString {
                             append("${uiState.downloadChunkConcurrency} 线程")
                             append(" · ")
-                            append(if (uiState.preferAnonymousDownloads) "匿名优先" else "账号优先")
+                            append(
+                                when {
+                                    !uiState.isLoginFeatureEnabled || !uiState.isLoggedInDownloadEnabled -> "仅匿名"
+                                    uiState.preferAnonymousDownloads -> "匿名优先"
+                                    else -> "账号优先"
+                                },
+                            )
                             append(" · ")
                             append(uiState.cdnTransportPreference.transportLabel())
                         },
@@ -221,12 +302,15 @@ fun SettingsScreen(
 
                     SettingsBooleanRow(
                         title = "默认启动到访客模式",
-                        description = if (uiState.defaultGuestMode) {
+                        description = if (!uiState.isLoginFeatureEnabled) {
+                            "登录功能关闭时，应用始终以匿名方式启动。"
+                        } else if (uiState.defaultGuestMode) {
                             "当前会先进入探索页，不主动恢复 Steam 登录。"
                         } else {
                             "当前会优先恢复上次登录状态，再进入内容页。"
                         },
                         checked = uiState.defaultGuestMode,
+                        enabled = uiState.isLoginFeatureEnabled,
                         onCheckedChange = viewModel::saveDefaultGuestMode,
                     )
                 }
@@ -350,6 +434,47 @@ fun SettingsScreen(
             }
         }
     }
+
+    if (showLoginRiskDialog) {
+        AlertDialog(
+            onDismissRequest = { showLoginRiskDialog = false },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showLoginRiskDialog = false
+                        viewModel.saveLoginFeatureEnabled(true)
+                    },
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text("仍然开启")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showLoginRiskDialog = false },
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text("保持匿名")
+                }
+            },
+            title = {
+                Text(
+                    text = "开启登录功能前请确认风险",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+            text = {
+                Text(
+                    text = "非官方客户端，存在账号风险，不建议主账号使用，建议保持匿名",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            shape = RoundedCornerShape(28.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+        )
+    }
 }
 
 @Composable
@@ -395,12 +520,18 @@ private fun AccountCard(
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         Text(
-                            text = if (isGuestMode) "当前状态" else "当前账号",
+                            text = when {
+                                !uiState.isLoginFeatureEnabled -> "账户能力"
+                                isGuestMode -> "当前状态"
+                                else -> "当前账号"
+                            },
                             style = MaterialTheme.typography.labelMedium,
                             color = Color.White.copy(alpha = 0.76f),
                         )
                         Text(
-                            text = if (isGuestMode) {
+                            text = if (!uiState.isLoginFeatureEnabled) {
+                                "当前仅开放匿名能力"
+                            } else if (isGuestMode) {
                                 "未连接 Steam"
                             } else {
                                 uiState.accountName.ifBlank { "未登录" }
@@ -412,26 +543,34 @@ private fun AccountCard(
                     }
                 }
 
-                Button(
-                    onClick = if (isGuestMode) onShowLogin else onLogout,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFF07E49),
-                        contentColor = Color.White,
-                    ),
-                ) {
-                    Icon(
-                        if (isGuestMode) Icons.Rounded.AccountCircle else Icons.AutoMirrored.Rounded.Logout,
-                        contentDescription = null,
-                    )
+                if (!uiState.isLoginFeatureEnabled) {
                     Text(
-                        text = if (isGuestMode) "前往登录" else "退出登录",
-                        modifier = Modifier.padding(start = 8.dp),
+                        text = "登录入口、已保存账号、自动恢复、已购和订阅信息都会在下方“账户行为”里单独开启。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.76f),
                     )
+                } else {
+                    Button(
+                        onClick = if (isGuestMode) onShowLogin else onLogout,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFF07E49),
+                            contentColor = Color.White,
+                        ),
+                    ) {
+                        Icon(
+                            if (isGuestMode) Icons.Rounded.AccountCircle else Icons.AutoMirrored.Rounded.Logout,
+                            contentDescription = null,
+                        )
+                        Text(
+                            text = if (isGuestMode) "前往登录" else "退出登录",
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
                 }
 
-                if (uiState.savedAccounts.isNotEmpty()) {
+                if (uiState.isLoginFeatureEnabled && uiState.savedAccounts.isNotEmpty()) {
                     HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(
@@ -1107,9 +1246,10 @@ private fun DownloadStrategyContent(
     onCdnTransportSelect: (CdnTransportPreference) -> Unit,
     onCdnPoolSelect: (CdnPoolPreference) -> Unit,
 ) {
+    val allowLoggedInDownload = uiState.isLoginFeatureEnabled && uiState.isLoggedInDownloadEnabled
     SettingsSubsectionTitle(
         title = "分块并发",
-        subtitle = "当前 ${uiState.downloadChunkConcurrency} 线程，移动端稳定上限 12。",
+        subtitle = "当前 ${uiState.downloadChunkConcurrency} 线程。下载时会按设备内存自动收紧，避免 OOM。",
     )
 
     FlowRow(
@@ -1129,15 +1269,25 @@ private fun DownloadStrategyContent(
 
     SettingsBooleanRow(
         title = "公开内容优先匿名下载",
-        description = "公开内容会优先使用匿名方式，必要时再使用当前登录账号。",
+        description = if (!allowLoggedInDownload) {
+            "当前只允许匿名下载，这个设置暂时不会生效。"
+        } else {
+            "公开内容会优先使用匿名方式，必要时再使用当前登录账号。"
+        },
         checked = uiState.preferAnonymousDownloads,
+        enabled = allowLoggedInDownload,
         onCheckedChange = onTogglePreferAnonymous,
     )
 
     SettingsBooleanRow(
         title = "匿名失败后回退到账号下载",
-        description = "仅在你已登录且任务绑定当前账号时生效。",
+        description = if (!allowLoggedInDownload) {
+            "需先在“账户行为”里打开“登录后下载”。"
+        } else {
+            "仅在你已登录且任务绑定当前账号时生效。"
+        },
         checked = uiState.allowAuthenticatedDownloadFallback,
+        enabled = allowLoggedInDownload,
         onCheckedChange = onToggleAllowAuthenticatedFallback,
     )
 
@@ -1221,6 +1371,7 @@ private fun SettingsBooleanRow(
     title: String,
     description: String,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Row(
@@ -1238,6 +1389,11 @@ private fun SettingsBooleanRow(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
             )
             Text(
                 text = description,
@@ -1250,6 +1406,7 @@ private fun SettingsBooleanRow(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
+            enabled = enabled,
         )
     }
 }
