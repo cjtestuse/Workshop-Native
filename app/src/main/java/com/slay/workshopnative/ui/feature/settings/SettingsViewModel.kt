@@ -15,18 +15,25 @@ import com.slay.workshopnative.core.storage.DEFAULT_DOWNLOAD_FOLDER_NAME
 import com.slay.workshopnative.core.storage.normalizeDownloadFolderName
 import com.slay.workshopnative.core.util.buildAccountBindingHash
 import com.slay.workshopnative.core.util.sanitizeRuntimeSourceAddress
+import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
 import com.slay.workshopnative.data.preferences.DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY
+import com.slay.workshopnative.data.preferences.DEFAULT_AZURE_TRANSLATOR_ENDPOINT
+import com.slay.workshopnative.data.preferences.DEFAULT_TRANSLATION_PROVIDER
 import com.slay.workshopnative.data.preferences.DownloadPerformanceMode
 import com.slay.workshopnative.data.local.DownloadTaskDao
 import com.slay.workshopnative.data.local.DownloadTaskEntity
 import com.slay.workshopnative.data.repository.DownloadsRepository
 import com.slay.workshopnative.data.repository.SteamRepository
+import com.slay.workshopnative.data.repository.TranslationRepository
 import com.slay.workshopnative.data.preferences.SavedSteamAccount
+import com.slay.workshopnative.data.preferences.TranslationProvider
 import com.slay.workshopnative.data.preferences.UserPreferences
 import com.slay.workshopnative.data.preferences.UserPreferencesStore
+import com.slay.workshopnative.data.preferences.displayLabel
+import com.slay.workshopnative.data.preferences.isReady
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -89,6 +96,18 @@ data class SettingsUiState(
     val cdnPoolPreference: CdnPoolPreference = CdnPoolPreference.Auto,
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
     val workshopAutoResolveVisibleItems: Boolean = false,
+    val translationProvider: TranslationProvider = DEFAULT_TRANSLATION_PROVIDER,
+    val translationAzureEndpoint: String = DEFAULT_AZURE_TRANSLATOR_ENDPOINT,
+    val translationAzureRegion: String = "",
+    val translationAzureApiKey: String = "",
+    val translationGoogleApiKey: String = "",
+    val isTranslationConfigured: Boolean = DEFAULT_TRANSLATION_PROVIDER.isReady(
+        azureEndpoint = DEFAULT_AZURE_TRANSLATOR_ENDPOINT,
+        azureApiKey = "",
+        googleApiKey = "",
+    ),
+    val isVerifyingTranslation: Boolean = false,
+    val translationStatusSummary: String? = null,
     val supportLogs: SupportLogUiState = SupportLogUiState(),
     val maintenanceSummary: String? = null,
 )
@@ -98,6 +117,7 @@ class SettingsViewModel @Inject constructor(
     private val preferencesStore: UserPreferencesStore,
     private val steamRepository: SteamRepository,
     private val downloadsRepository: DownloadsRepository,
+    private val translationRepository: TranslationRepository,
     private val downloadTaskDao: DownloadTaskDao,
     private val okHttpClient: OkHttpClient,
     private val supportDiagnosticsStore: SupportDiagnosticsStore,
@@ -111,17 +131,25 @@ class SettingsViewModel @Inject constructor(
 
     private val avatarUrl = MutableStateFlow<String?>(null)
     private val maintenanceState = MutableStateFlow(MaintenanceUiState())
+    private val translationStatusState = MutableStateFlow(TranslationStatusUiState())
     private val supportLogsState = MutableStateFlow(SupportLogUiState())
     private val preferences = preferencesStore.preferences
     private var avatarCacheEntry: AvatarCacheEntry? = null
+    private val auxiliaryUiState = combine(
+        maintenanceState,
+        translationStatusState,
+        supportLogsState,
+    ) { maintenance, translationStatus, supportLogs ->
+        Triple(maintenance, translationStatus, supportLogs)
+    }
 
     val uiState: StateFlow<SettingsUiState> = combine(
         preferences,
         steamRepository.sessionState,
         avatarUrl,
-        maintenanceState,
-        supportLogsState,
-    ) { prefs, session, avatar, maintenance, supportLogs ->
+        auxiliaryUiState,
+    ) { prefs, session, avatar, auxiliary ->
+        val (maintenance, translationStatus, supportLogs) = auxiliary
         val accountName = session.account?.accountName
             ?.takeIf(String::isNotBlank)
             ?: prefs.accountName
@@ -149,6 +177,14 @@ class SettingsViewModel @Inject constructor(
             cdnPoolPreference = prefs.cdnPoolPreference,
             workshopPageSize = prefs.workshopPageSize,
             workshopAutoResolveVisibleItems = prefs.workshopAutoResolveVisibleItems,
+            translationProvider = prefs.translationProvider,
+            translationAzureEndpoint = prefs.translationAzureEndpoint,
+            translationAzureRegion = prefs.translationAzureRegion,
+            translationAzureApiKey = prefs.translationAzureApiKey,
+            translationGoogleApiKey = prefs.translationGoogleApiKey,
+            isTranslationConfigured = prefs.isTranslationConfigured,
+            isVerifyingTranslation = translationStatus.isVerifying,
+            translationStatusSummary = translationStatus.summary,
             supportLogs = supportLogs,
             maintenanceSummary = maintenance.summary,
         )
@@ -338,6 +374,74 @@ class SettingsViewModel @Inject constructor(
                     "已关闭列表预读。工坊列表会先轻量加载，详情和下载方式改为点开后再检测。"
                 },
             )
+        }
+    }
+
+    fun saveTranslationSettings(
+        provider: TranslationProvider,
+        azureEndpoint: String,
+        azureRegion: String,
+        azureApiKey: String,
+        googleApiKey: String,
+    ) {
+        viewModelScope.launch {
+            preferencesStore.saveTranslationProvider(provider)
+            preferencesStore.saveTranslationAzureEndpoint(azureEndpoint)
+            preferencesStore.saveTranslationAzureRegion(azureRegion)
+            preferencesStore.saveTranslationAzureApiKey(azureApiKey)
+            preferencesStore.saveTranslationGoogleApiKey(googleApiKey)
+            translationStatusState.value = TranslationStatusUiState(
+                summary = when (provider) {
+                    TranslationProvider.Disabled -> "已关闭简介翻译功能。"
+                    TranslationProvider.AzureTranslator -> "已保存 Azure Translator 配置。"
+                    TranslationProvider.GoogleCloudTranslate -> "已保存 Google Cloud Translation 配置。"
+                    TranslationProvider.GoogleWebTranslate -> "已启用 Google Web 实验翻译模式。"
+                    TranslationProvider.MicrosoftEdgeTranslate -> "已启用 Microsoft Edge 实验翻译模式。"
+                },
+            )
+        }
+    }
+
+    fun clearTranslationSettings() {
+        viewModelScope.launch {
+            preferencesStore.clearTranslationSettings()
+            translationStatusState.value = TranslationStatusUiState(
+                summary = "已清空翻译服务配置。",
+            )
+        }
+    }
+
+    fun verifyTranslationSettings() {
+        viewModelScope.launch {
+            translationStatusState.value = TranslationStatusUiState(
+                isVerifying = true,
+                summary = "正在测试当前翻译配置…",
+            )
+            translationRepository.translateToChinese(
+                sourceText = "Hello Workshop Native",
+                forceRefresh = true,
+            )
+                .onSuccess { result ->
+                    translationStatusState.value = TranslationStatusUiState(
+                        isVerifying = false,
+                        summary = buildString {
+                            append("翻译测试成功：")
+                            append(result.provider.displayLabel())
+                            result.detectedSourceLanguageLabel?.let { language ->
+                                append("，识别原文为")
+                                append(language)
+                            }
+                            append("。示例结果：")
+                            append(result.translatedText.take(18))
+                        },
+                    )
+                }
+                .onFailure { error ->
+                    translationStatusState.value = TranslationStatusUiState(
+                        isVerifying = false,
+                        summary = error.toUserMessage("翻译测试失败"),
+                    )
+                }
         }
     }
 
@@ -688,6 +792,11 @@ class SettingsViewModel @Inject constructor(
 }
 
 private data class MaintenanceUiState(
+    val summary: String? = null,
+)
+
+private data class TranslationStatusUiState(
+    val isVerifying: Boolean = false,
     val summary: String? = null,
 )
 

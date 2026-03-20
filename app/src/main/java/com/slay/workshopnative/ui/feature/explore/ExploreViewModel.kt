@@ -4,12 +4,16 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.core.logging.SupportDiagnosticsStore
+import com.slay.workshopnative.core.util.textFingerprint
 import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.model.FavoriteWorkshopGame
 import com.slay.workshopnative.data.model.GameDetails
 import com.slay.workshopnative.data.model.WorkshopGameEntry
 import com.slay.workshopnative.data.repository.SteamRepository
+import com.slay.workshopnative.data.repository.TranslationRepository
 import com.slay.workshopnative.data.repository.WorkshopFavoritesRepository
+import com.slay.workshopnative.data.preferences.displayLabel
+import com.slay.workshopnative.ui.InlineTranslationState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.Job
@@ -31,6 +35,7 @@ data class ExploreUiState(
     val searchResults: List<WorkshopGameEntry> = emptyList(),
     val favoriteGames: List<FavoriteWorkshopGame> = emptyList(),
     val gameDetailsByAppId: Map<Int, GameDetails> = emptyMap(),
+    val descriptionTranslationByAppId: Map<Int, InlineTranslationState> = emptyMap(),
     val loadingDetailsAppId: Int? = null,
     val errorMessage: String? = null,
 ) {
@@ -44,6 +49,7 @@ data class ExploreUiState(
 @HiltViewModel
 class ExploreViewModel @Inject constructor(
     private val steamRepository: SteamRepository,
+    private val translationRepository: TranslationRepository,
     private val favoritesRepository: WorkshopFavoritesRepository,
     private val supportDiagnosticsStore: SupportDiagnosticsStore,
 ) : ViewModel() {
@@ -161,6 +167,107 @@ class ExploreViewModel @Inject constructor(
                         )
                     }
                 }
+        }
+    }
+
+    fun translateGameDescription(
+        appId: Int,
+        sourceText: String,
+        forceRefresh: Boolean = false,
+    ) {
+        val normalized = sourceText.trim()
+        if (appId <= 0 || normalized.isBlank()) return
+        val fingerprint = textFingerprint(normalized)
+        val current = _uiState.value.descriptionTranslationByAppId[appId]
+        val reusableState = current?.takeIf { it.sourceFingerprint == fingerprint }
+        if (!forceRefresh &&
+            current?.sourceFingerprint == fingerprint &&
+            !current.translatedText.isNullOrBlank()
+        ) {
+            _uiState.update {
+                it.copy(
+                    descriptionTranslationByAppId = it.descriptionTranslationByAppId + (
+                        appId to current.copy(showTranslated = true, errorMessage = null)
+                    ),
+                )
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    descriptionTranslationByAppId = it.descriptionTranslationByAppId + (
+                        appId to InlineTranslationState(
+                            sourceFingerprint = fingerprint,
+                            translatedText = reusableState?.translatedText,
+                            providerLabel = reusableState?.providerLabel,
+                            sourceLanguageLabel = reusableState?.sourceLanguageLabel,
+                            isTranslating = true,
+                            showTranslated = false,
+                            errorMessage = null,
+                        )
+                    ),
+                )
+            }
+            translationRepository.translateToChinese(normalized, forceRefresh = forceRefresh)
+                .onSuccess { result ->
+                    _uiState.update {
+                        it.copy(
+                            descriptionTranslationByAppId = it.descriptionTranslationByAppId + (
+                                appId to InlineTranslationState(
+                                    sourceFingerprint = fingerprint,
+                                    translatedText = result.translatedText,
+                                    providerLabel = result.provider.displayLabel(),
+                                    sourceLanguageLabel = result.detectedSourceLanguageLabel,
+                                    isTranslating = false,
+                                    showTranslated = true,
+                                    errorMessage = null,
+                                )
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                    descriptionTranslationByAppId = it.descriptionTranslationByAppId + (
+                                appId to InlineTranslationState(
+                                    sourceFingerprint = fingerprint,
+                                    translatedText = reusableState?.translatedText,
+                                    providerLabel = reusableState?.providerLabel,
+                                    sourceLanguageLabel = reusableState?.sourceLanguageLabel,
+                                    isTranslating = false,
+                                    showTranslated = false,
+                                    errorMessage = error.toUserMessage("翻译失败"),
+                                )
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    fun showOriginalGameDescription(appId: Int) {
+        val current = _uiState.value.descriptionTranslationByAppId[appId] ?: return
+        _uiState.update {
+            it.copy(
+                descriptionTranslationByAppId = it.descriptionTranslationByAppId + (
+                    appId to current.copy(showTranslated = false, errorMessage = null)
+                ),
+            )
+        }
+    }
+
+    fun showTranslatedGameDescription(appId: Int) {
+        val current = _uiState.value.descriptionTranslationByAppId[appId] ?: return
+        if (current.translatedText.isNullOrBlank()) return
+        _uiState.update {
+            it.copy(
+                descriptionTranslationByAppId = it.descriptionTranslationByAppId + (
+                    appId to current.copy(showTranslated = true, errorMessage = null)
+                ),
+            )
         }
     }
 

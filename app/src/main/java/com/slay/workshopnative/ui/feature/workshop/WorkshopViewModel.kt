@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.slay.workshopnative.core.logging.AppLog
+import com.slay.workshopnative.core.util.textFingerprint
 import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.local.DownloadTaskEntity
 import com.slay.workshopnative.data.model.SessionStatus
@@ -15,8 +16,10 @@ import com.slay.workshopnative.data.model.WorkshopBrowseSortOption
 import com.slay.workshopnative.data.model.WorkshopBrowseTagGroup
 import com.slay.workshopnative.data.model.WorkshopItem
 import com.slay.workshopnative.data.preferences.UserPreferencesStore
+import com.slay.workshopnative.data.preferences.displayLabel
 import com.slay.workshopnative.data.repository.DownloadsRepository
 import com.slay.workshopnative.data.repository.SteamRepository
+import com.slay.workshopnative.data.repository.TranslationRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import com.slay.workshopnative.ui.InlineTranslationState
 
 data class WorkshopUiState(
     val appId: Int = 0,
@@ -52,6 +56,7 @@ data class WorkshopUiState(
     val downloadIdentityLabel: String = "匿名下载",
     val downloadIdentityDescription: String = "当前未登录，将直接按匿名方式尝试公开下载。",
     val selectedItem: WorkshopItem? = null,
+    val descriptionTranslationByPublishedFileId: Map<Long, InlineTranslationState> = emptyMap(),
     val downloadTasksByPublishedFileId: Map<Long, DownloadTaskEntity> = emptyMap(),
     val queueingPublishedFileId: Long? = null,
     val errorMessage: String? = null,
@@ -62,6 +67,7 @@ data class WorkshopUiState(
 class WorkshopViewModel @Inject constructor(
     private val steamRepository: SteamRepository,
     private val downloadsRepository: DownloadsRepository,
+    private val translationRepository: TranslationRepository,
     private val preferencesStore: UserPreferencesStore,
 ) : ViewModel() {
     private companion object {
@@ -302,6 +308,107 @@ class WorkshopViewModel @Inject constructor(
 
     fun dismissItemDetails() {
         _uiState.update { it.copy(selectedItem = null, isResolvingSelection = false) }
+    }
+
+    fun translateItemDescription(
+        publishedFileId: Long,
+        sourceText: String,
+        forceRefresh: Boolean = false,
+    ) {
+        val normalized = sourceText.trim()
+        if (publishedFileId <= 0L || normalized.isBlank()) return
+        val fingerprint = textFingerprint(normalized)
+        val current = _uiState.value.descriptionTranslationByPublishedFileId[publishedFileId]
+        val reusableState = current?.takeIf { it.sourceFingerprint == fingerprint }
+        if (!forceRefresh &&
+            current?.sourceFingerprint == fingerprint &&
+            !current.translatedText.isNullOrBlank()
+        ) {
+            _uiState.update {
+                it.copy(
+                    descriptionTranslationByPublishedFileId = it.descriptionTranslationByPublishedFileId + (
+                        publishedFileId to current.copy(showTranslated = true, errorMessage = null)
+                    ),
+                )
+            }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    descriptionTranslationByPublishedFileId = it.descriptionTranslationByPublishedFileId + (
+                        publishedFileId to InlineTranslationState(
+                            sourceFingerprint = fingerprint,
+                            translatedText = reusableState?.translatedText,
+                            providerLabel = reusableState?.providerLabel,
+                            sourceLanguageLabel = reusableState?.sourceLanguageLabel,
+                            isTranslating = true,
+                            showTranslated = false,
+                            errorMessage = null,
+                        )
+                    ),
+                )
+            }
+            translationRepository.translateToChinese(normalized, forceRefresh = forceRefresh)
+                .onSuccess { result ->
+                    _uiState.update {
+                        it.copy(
+                            descriptionTranslationByPublishedFileId = it.descriptionTranslationByPublishedFileId + (
+                                publishedFileId to InlineTranslationState(
+                                    sourceFingerprint = fingerprint,
+                                    translatedText = result.translatedText,
+                                    providerLabel = result.provider.displayLabel(),
+                                    sourceLanguageLabel = result.detectedSourceLanguageLabel,
+                                    isTranslating = false,
+                                    showTranslated = true,
+                                    errorMessage = null,
+                                )
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                    descriptionTranslationByPublishedFileId = it.descriptionTranslationByPublishedFileId + (
+                                publishedFileId to InlineTranslationState(
+                                    sourceFingerprint = fingerprint,
+                                    translatedText = reusableState?.translatedText,
+                                    providerLabel = reusableState?.providerLabel,
+                                    sourceLanguageLabel = reusableState?.sourceLanguageLabel,
+                                    isTranslating = false,
+                                    showTranslated = false,
+                                    errorMessage = error.toUserMessage("翻译失败"),
+                                )
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    fun showOriginalItemDescription(publishedFileId: Long) {
+        val current = _uiState.value.descriptionTranslationByPublishedFileId[publishedFileId] ?: return
+        _uiState.update {
+            it.copy(
+                descriptionTranslationByPublishedFileId = it.descriptionTranslationByPublishedFileId + (
+                    publishedFileId to current.copy(showTranslated = false, errorMessage = null)
+                ),
+            )
+        }
+    }
+
+    fun showTranslatedItemDescription(publishedFileId: Long) {
+        val current = _uiState.value.descriptionTranslationByPublishedFileId[publishedFileId] ?: return
+        if (current.translatedText.isNullOrBlank()) return
+        _uiState.update {
+            it.copy(
+                descriptionTranslationByPublishedFileId = it.descriptionTranslationByPublishedFileId + (
+                    publishedFileId to current.copy(showTranslated = true, errorMessage = null)
+                ),
+            )
+        }
     }
 
     fun enqueueDownload(item: WorkshopItem) {

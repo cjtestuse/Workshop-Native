@@ -49,7 +49,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -89,6 +88,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.slay.workshopnative.core.util.formatBytes
 import com.slay.workshopnative.core.util.formatEpochSeconds
+import com.slay.workshopnative.core.util.textFingerprint
 import com.slay.workshopnative.data.local.DownloadStatus
 import com.slay.workshopnative.data.local.DownloadTaskEntity
 import com.slay.workshopnative.data.model.WorkshopBrowsePeriodOption
@@ -102,6 +102,8 @@ import com.slay.workshopnative.data.model.WorkshopDateRangeFilter
 import com.slay.workshopnative.data.model.WorkshopItem
 import com.slay.workshopnative.ui.components.ArtworkThumbnail
 import com.slay.workshopnative.ui.components.ExpandableBodyText
+import com.slay.workshopnative.ui.components.TranslatableDescriptionCard
+import com.slay.workshopnative.ui.components.WorkshopNativeModalBottomSheet
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -425,15 +427,31 @@ fun WorkshopScreen(
     }
 
     state.selectedItem?.let { item ->
-        ModalBottomSheet(onDismissRequest = viewModel::dismissItemDetails) {
+        val description = item.description.ifBlank {
+            item.shortDescription.ifBlank { "这个条目没有提供额外介绍。" }
+        }
+        val translationState = state.descriptionTranslationByPublishedFileId[item.publishedFileId]
+            ?.takeIf { it.sourceFingerprint == textFingerprint(description.trim()) }
+        WorkshopNativeModalBottomSheet(onDismissRequest = viewModel::dismissItemDetails) {
             WorkshopDetailSheet(
                 item = item,
+                description = description,
+                translationState = translationState,
                 latestTask = state.downloadTasksByPublishedFileId[item.publishedFileId],
                 showSubscriptionState = state.showSubscriptionState,
                 downloadIdentityLabel = state.downloadIdentityLabel,
                 downloadIdentityDescription = state.downloadIdentityDescription,
                 isQueueing = state.queueingPublishedFileId == item.publishedFileId,
                 isResolving = state.isResolvingSelection,
+                onTranslateDescription = {
+                    viewModel.translateItemDescription(
+                        publishedFileId = item.publishedFileId,
+                        sourceText = description,
+                        forceRefresh = !translationState?.translatedText.isNullOrBlank(),
+                    )
+                },
+                onShowOriginalDescription = { viewModel.showOriginalItemDescription(item.publishedFileId) },
+                onShowTranslatedDescription = { viewModel.showTranslatedItemDescription(item.publishedFileId) },
                 onDownload = { viewModel.enqueueDownload(item) },
                 onOpenDownloads = onOpenDownloads,
             )
@@ -893,7 +911,7 @@ private fun QuickChoiceSheet(
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    WorkshopNativeModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1126,12 +1144,17 @@ private fun PaginationCard(
 @Composable
 private fun WorkshopDetailSheet(
     item: WorkshopItem,
+    description: String,
+    translationState: com.slay.workshopnative.ui.InlineTranslationState?,
     latestTask: DownloadTaskEntity?,
     showSubscriptionState: Boolean,
     downloadIdentityLabel: String,
     downloadIdentityDescription: String,
     isQueueing: Boolean,
     isResolving: Boolean,
+    onTranslateDescription: () -> Unit,
+    onShowOriginalDescription: () -> Unit,
+    onShowTranslatedDescription: () -> Unit,
     onDownload: () -> Unit,
     onOpenDownloads: () -> Unit,
 ) {
@@ -1233,28 +1256,20 @@ private fun WorkshopDetailSheet(
         } else {
             WorkshopOverviewCard(item = item, autoResolveDownloadInfo = true)
 
-            Surface(
-                color = Color.White.copy(alpha = 0.8f),
-                shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = "条目介绍",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    ExpandableBodyText(
-                        text = item.description.ifBlank {
-                            item.shortDescription.ifBlank { "这个条目没有提供额外介绍。" }
-                        },
-                        collapsedMaxLines = 6,
-                    )
-                }
-            }
+            TranslatableDescriptionCard(
+                title = "条目介绍",
+                originalText = description,
+                translatedText = translationState?.translatedText,
+                providerLabel = translationState?.providerLabel,
+                sourceLanguageLabel = translationState?.sourceLanguageLabel,
+                isTranslating = translationState?.isTranslating == true,
+                showTranslated = translationState?.showTranslated == true,
+                errorMessage = translationState?.errorMessage,
+                collapsedMaxLines = 6,
+                onTranslate = onTranslateDescription,
+                onShowOriginal = onShowOriginalDescription,
+                onShowTranslated = onShowTranslatedDescription,
+            )
 
             if (item.tags.isNotEmpty()) {
                 WorkshopTagsCard(tags = item.tags)
@@ -1566,7 +1581,7 @@ private fun FilterSheet(
         )
     }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    WorkshopNativeModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()

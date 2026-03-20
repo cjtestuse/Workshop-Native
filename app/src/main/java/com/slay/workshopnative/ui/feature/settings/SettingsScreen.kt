@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ColumnScope
@@ -37,7 +38,10 @@ import androidx.compose.material.icons.rounded.PrivacyTip
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.SystemUpdateAlt
 import androidx.compose.material.icons.rounded.TravelExplore
+import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -45,9 +49,11 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -58,6 +64,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,7 +74,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -77,7 +87,12 @@ import com.slay.workshopnative.core.util.openUrlWithChooser
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
+import com.slay.workshopnative.data.preferences.DEFAULT_AZURE_TRANSLATOR_ENDPOINT
 import com.slay.workshopnative.data.preferences.DownloadPerformanceMode
+import com.slay.workshopnative.data.preferences.TranslationProvider
+import com.slay.workshopnative.data.preferences.displayLabel
+import com.slay.workshopnative.data.preferences.isExperimental
+import com.slay.workshopnative.data.preferences.settingsStatusLabel
 import com.slay.workshopnative.ui.AppNoticeItem
 import com.slay.workshopnative.ui.AppUpdateUiState
 import com.slay.workshopnative.ui.WorkshopNativeAbout
@@ -86,6 +101,7 @@ private enum class SettingsDestination {
     DownloadLocation,
     DownloadStrategy,
     Workshop,
+    Translation,
     DataPrivacy,
     About,
     UsageBoundary,
@@ -105,7 +121,10 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    var activeDestination by remember { mutableStateOf<SettingsDestination?>(null) }
+    var activeDestinationName by rememberSaveable { mutableStateOf<String?>(null) }
+    val activeDestination = activeDestinationName
+        ?.let { destinationName -> SettingsDestination.entries.firstOrNull { it.name == destinationName } }
+    val settingsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showLoginRiskDialog by remember { mutableStateOf(false) }
     val openExternalUrl: (String) -> Unit = { url ->
         if (!context.openUrlWithChooser(url, chooserTitle = "选择浏览器")) {
@@ -265,7 +284,7 @@ fun SettingsScreen(
                             append(" / ")
                             append(uiState.effectiveDownloadFolderName)
                         },
-                        onClick = { activeDestination = SettingsDestination.DownloadLocation },
+                        onClick = { activeDestinationName = SettingsDestination.DownloadLocation.name },
                     )
                     SettingsNavigationRow(
                         icon = Icons.Rounded.Tune,
@@ -284,7 +303,7 @@ fun SettingsScreen(
                             append(" · ")
                             append(uiState.cdnTransportPreference.transportLabel())
                         },
-                        onClick = { activeDestination = SettingsDestination.DownloadStrategy },
+                        onClick = { activeDestinationName = SettingsDestination.DownloadStrategy.name },
                     )
                     SettingsNavigationRow(
                         icon = Icons.Rounded.TravelExplore,
@@ -295,7 +314,18 @@ fun SettingsScreen(
                             append(" · ")
                             append(if (uiState.workshopAutoResolveVisibleItems) "列表预读已开" else "列表预读已关")
                         },
-                        onClick = { activeDestination = SettingsDestination.Workshop },
+                        onClick = { activeDestinationName = SettingsDestination.Workshop.name },
+                    )
+                    SettingsNavigationRow(
+                        icon = Icons.Rounded.Translate,
+                        iconTint = Color(0xFF7E5BA6),
+                        title = "翻译服务",
+                        summary = buildString {
+                            append(uiState.translationProvider.displayLabel())
+                            append(" · ")
+                            append(uiState.translationProvider.settingsStatusLabel(uiState.isTranslationConfigured))
+                        },
+                        onClick = { activeDestinationName = SettingsDestination.Translation.name },
                     )
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
@@ -330,7 +360,7 @@ fun SettingsScreen(
                         title = "数据与隐私",
                         summary = uiState.maintenanceSummary
                             ?: "查看本地保存内容，清理缓存、登录状态和下载诊断。",
-                        onClick = { activeDestination = SettingsDestination.DataPrivacy },
+                        onClick = { activeDestinationName = SettingsDestination.DataPrivacy.name },
                     )
                 }
             }
@@ -348,14 +378,14 @@ fun SettingsScreen(
                         iconTint = Color(0xFF8A633B),
                         title = "关于 Workshop Native",
                         summary = "开源地址、作者信息、版本信息与使用说明。",
-                        onClick = { activeDestination = SettingsDestination.About },
+                        onClick = { activeDestinationName = SettingsDestination.About.name },
                     )
                     SettingsNavigationRow(
                         icon = Icons.Rounded.PrivacyTip,
                         iconTint = Color(0xFF8F4A4A),
                         title = "学习交流与使用边界",
                         summary = "查看合法使用范围、禁止用途和权利反馈说明。",
-                        onClick = { activeDestination = SettingsDestination.UsageBoundary },
+                        onClick = { activeDestinationName = SettingsDestination.UsageBoundary.name },
                     )
                 }
             }
@@ -363,12 +393,16 @@ fun SettingsScreen(
     }
 
     activeDestination?.let { destination ->
-        ModalBottomSheet(onDismissRequest = { activeDestination = null }) {
+        ModalBottomSheet(
+            onDismissRequest = { activeDestinationName = null },
+            sheetState = settingsSheetState,
+        ) {
             SettingsSheetScaffold(
                 title = when (destination) {
                     SettingsDestination.DownloadLocation -> "下载位置"
                     SettingsDestination.DownloadStrategy -> "下载策略"
                     SettingsDestination.Workshop -> "创意工坊"
+                    SettingsDestination.Translation -> "翻译服务"
                     SettingsDestination.DataPrivacy -> "数据与隐私"
                     SettingsDestination.About -> "关于 Workshop Native"
                     SettingsDestination.UsageBoundary -> "学习交流与使用边界"
@@ -377,6 +411,7 @@ fun SettingsScreen(
                     SettingsDestination.DownloadLocation -> "控制结果最终整理到哪里。"
                     SettingsDestination.DownloadStrategy -> "控制并发、匿名优先和 CDN 连接策略。"
                     SettingsDestination.Workshop -> "控制每页数量与下载方式检测。"
+                    SettingsDestination.Translation -> "配置简介翻译提供商，手动把游戏或工坊介绍翻译成中文。"
                     SettingsDestination.DataPrivacy -> "查看本地保存内容，并清理缓存、历史和诊断信息。"
                     SettingsDestination.About -> "查看作者、开源地址和首次启动时展示的说明。"
                     SettingsDestination.UsageBoundary -> "查看使用范围、权利边界和通过项目主页反馈问题的方式。"
@@ -405,6 +440,13 @@ fun SettingsScreen(
                         uiState = uiState,
                         onPageSizeSelect = viewModel::saveWorkshopPageSize,
                         onToggleAutoResolve = viewModel::saveWorkshopAutoResolveVisibleItems,
+                    )
+
+                    SettingsDestination.Translation -> TranslationSettingsContent(
+                        uiState = uiState,
+                        onSave = viewModel::saveTranslationSettings,
+                        onClear = viewModel::clearTranslationSettings,
+                        onVerify = viewModel::verifyTranslationSettings,
                     )
 
                     SettingsDestination.DataPrivacy -> DataPrivacyContent(
@@ -1365,6 +1407,285 @@ private fun WorkshopSettingsContent(
         checked = uiState.workshopAutoResolveVisibleItems,
         onCheckedChange = onToggleAutoResolve,
     )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TranslationSettingsContent(
+    uiState: SettingsUiState,
+    onSave: (TranslationProvider, String, String, String, String) -> Unit,
+    onClear: () -> Unit,
+    onVerify: () -> Unit,
+) {
+    var provider by remember(uiState.translationProvider) { mutableStateOf(uiState.translationProvider) }
+    var azureEndpoint by remember(uiState.translationAzureEndpoint) { mutableStateOf(uiState.translationAzureEndpoint) }
+    var azureRegion by remember(uiState.translationAzureRegion) { mutableStateOf(uiState.translationAzureRegion) }
+    var azureApiKey by remember(uiState.translationAzureApiKey) { mutableStateOf(uiState.translationAzureApiKey) }
+    var googleApiKey by remember(uiState.translationGoogleApiKey) { mutableStateOf(uiState.translationGoogleApiKey) }
+    var azureApiKeyVisible by rememberSaveable { mutableStateOf(false) }
+    var googleApiKeyVisible by rememberSaveable { mutableStateOf(false) }
+    val builtInProviders = remember {
+        listOf(
+            TranslationProvider.Disabled,
+            TranslationProvider.AzureTranslator,
+            TranslationProvider.GoogleCloudTranslate,
+        )
+    }
+    val experimentalProviders = remember {
+        listOf(
+            TranslationProvider.GoogleWebTranslate,
+            TranslationProvider.MicrosoftEdgeTranslate,
+        )
+    }
+    val normalizedDraftAzureEndpoint = azureEndpoint.trim().ifBlank { DEFAULT_AZURE_TRANSLATOR_ENDPOINT }
+    val normalizedDraftAzureRegion = azureRegion.trim()
+    val normalizedDraftAzureApiKey = azureApiKey.trim()
+    val normalizedDraftGoogleApiKey = googleApiKey.trim()
+    val hasPendingChanges = provider != uiState.translationProvider ||
+        normalizedDraftAzureEndpoint != uiState.translationAzureEndpoint ||
+        normalizedDraftAzureRegion != uiState.translationAzureRegion ||
+        normalizedDraftAzureApiKey != uiState.translationAzureApiKey ||
+        normalizedDraftGoogleApiKey != uiState.translationGoogleApiKey
+    val isDraftConfigured = isTranslationDraftConfigured(
+        provider = provider,
+        azureEndpoint = normalizedDraftAzureEndpoint,
+        azureApiKey = normalizedDraftAzureApiKey,
+        googleApiKey = normalizedDraftGoogleApiKey,
+    )
+
+    SettingsSubsectionTitle(
+        title = "翻译提供商",
+        subtitle = if (hasPendingChanges) {
+            "当前有未保存的更改。保存后再测试，详情页才会使用最新配置。"
+        } else if (provider == TranslationProvider.Disabled) {
+            "当前未启用简介翻译。详情页不会发起额外翻译请求。"
+        } else if (provider.isExperimental()) {
+            "当前 ${uiState.translationProvider.displayLabel()} 为实验模式，无需填写密钥。"
+        } else if (uiState.isTranslationConfigured) {
+            "当前 ${uiState.translationProvider.displayLabel()} 已配置完成。"
+        } else {
+            "当前未配置。详情页点击“翻译成中文”前，请先完成这里的设置。"
+        },
+    )
+
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        builtInProviders.forEach { option ->
+            SettingsChoiceChip(
+                label = option.displayLabel(),
+                selected = provider == option,
+                onClick = { provider = option },
+            )
+        }
+    }
+    SettingsInlineHint(text = "官方模式更稳定，但 Azure 和 Google Cloud 都需要你自己提供凭据。")
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsSubsectionTitle(
+        title = "实验模式",
+        subtitle = "无需密钥，但依赖非官方网页或客户端通道，可用性会随服务端策略变化。",
+    )
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        experimentalProviders.forEach { option ->
+            SettingsChoiceChip(
+                label = option.displayLabel(),
+                selected = provider == option,
+                onClick = { provider = option },
+            )
+        }
+    }
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    when (provider) {
+        TranslationProvider.Disabled -> {
+            SettingsInlineHint(text = "关闭后不会移除已保存密钥，只是详情页不再发起翻译请求。")
+        }
+
+        TranslationProvider.AzureTranslator -> {
+            SettingsSubsectionTitle(
+                title = "Azure Translator",
+                subtitle = "最少需要 Endpoint 和 API Key。Region 只有区域资源时才需要填写。",
+            )
+            OutlinedTextField(
+                value = azureEndpoint,
+                onValueChange = { azureEndpoint = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Endpoint") },
+                shape = RoundedCornerShape(20.dp),
+            )
+            OutlinedTextField(
+                value = azureRegion,
+                onValueChange = { azureRegion = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Region") },
+                placeholder = { Text("Global 资源可留空") },
+                shape = RoundedCornerShape(20.dp),
+            )
+            OutlinedTextField(
+                value = azureApiKey,
+                onValueChange = { azureApiKey = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("API Key") },
+                trailingIcon = {
+                    IconButton(onClick = { azureApiKeyVisible = !azureApiKeyVisible }) {
+                        Icon(
+                            imageVector = if (azureApiKeyVisible) {
+                                Icons.Rounded.VisibilityOff
+                            } else {
+                                Icons.Rounded.Visibility
+                            },
+                            contentDescription = if (azureApiKeyVisible) "隐藏 Azure API Key" else "显示 Azure API Key",
+                        )
+                    }
+                },
+                visualTransformation = if (azureApiKeyVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                shape = RoundedCornerShape(20.dp),
+            )
+            SettingsInlineHint(text = "默认全局 Endpoint 通常是 https://api.cognitive.microsofttranslator.com")
+        }
+
+        TranslationProvider.GoogleCloudTranslate -> {
+            SettingsSubsectionTitle(
+                title = "Google Cloud Translation",
+                subtitle = "最少需要 API Key。建议在 Google Cloud 控制台中限制包名、SHA-1 和可调用 API。",
+            )
+            OutlinedTextField(
+                value = googleApiKey,
+                onValueChange = { googleApiKey = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("API Key") },
+                trailingIcon = {
+                    IconButton(onClick = { googleApiKeyVisible = !googleApiKeyVisible }) {
+                        Icon(
+                            imageVector = if (googleApiKeyVisible) {
+                                Icons.Rounded.VisibilityOff
+                            } else {
+                                Icons.Rounded.Visibility
+                            },
+                            contentDescription = if (googleApiKeyVisible) "隐藏 Google API Key" else "显示 Google API Key",
+                        )
+                    }
+                },
+                visualTransformation = if (googleApiKeyVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                shape = RoundedCornerShape(20.dp),
+            )
+            SettingsInlineHint(text = "使用 Google 时，应用内展示翻译结果应保留 Google 归因说明。")
+        }
+
+        TranslationProvider.GoogleWebTranslate -> {
+            SettingsSubsectionTitle(
+                title = "Google Web 翻译",
+                subtitle = "直接调用 Google 网页翻译通道，无需 API Key。",
+            )
+            SettingsInlineHint(text = "该模式依赖 Google 网页接口。可直接使用，但未来可能出现限流、失效或返回结构变化。")
+        }
+
+        TranslationProvider.MicrosoftEdgeTranslate -> {
+            SettingsSubsectionTitle(
+                title = "Microsoft Edge 翻译",
+                subtitle = "直接复用 Microsoft Edge 翻译认证通道，无需 Azure 资源和 API Key。",
+            )
+            SettingsInlineHint(text = "该模式依赖 Edge 客户端通道。可直接使用，但未来可能被微软调整、限流或关闭。")
+        }
+    }
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    when {
+        hasPendingChanges -> {
+            SettingsInlineHint(text = "你修改了翻译参数，保存后才能使用“测试当前配置”。")
+        }
+
+        provider != TranslationProvider.Disabled && !uiState.isTranslationConfigured -> {
+            SettingsInlineHint(text = "当前配置仍不完整。补齐必填项并保存后，详情页才会发起翻译请求。")
+        }
+
+        provider.isExperimental() -> {
+            SettingsInlineHint(text = "实验模式无需密钥。保存后即可在详情页手动翻译，但测试通过也不代表长期稳定。")
+        }
+
+        provider != TranslationProvider.Disabled && isDraftConfigured -> {
+            SettingsInlineHint(text = "详情页会在你手动点击“翻译成中文”后发起请求，原文会继续保留，可随时切回。")
+        }
+    }
+
+    uiState.translationStatusSummary?.let { summary ->
+        SettingsInlineHint(text = summary)
+    }
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsActionButton(
+        text = "保存翻译配置",
+        enabled = hasPendingChanges,
+        onClick = {
+            onSave(
+                provider,
+                azureEndpoint,
+                azureRegion,
+                azureApiKey,
+                googleApiKey,
+            )
+        },
+    )
+    SettingsActionButton(
+        text = if (uiState.isVerifyingTranslation) "正在测试配置…" else "测试当前配置",
+        enabled = !hasPendingChanges &&
+            uiState.translationProvider != TranslationProvider.Disabled &&
+            uiState.isTranslationConfigured &&
+            !uiState.isVerifyingTranslation,
+        onClick = onVerify,
+    )
+    SettingsActionButton(
+        text = "清空已保存配置",
+        enabled = hasPendingChanges ||
+            uiState.isTranslationConfigured ||
+            uiState.translationProvider != TranslationProvider.Disabled,
+        onClick = onClear,
+    )
+    SettingsInlineHint(
+        text = if (provider.isExperimental()) {
+            "“测试当前配置”会直接测试当前实验通道是否可访问。修改后请先保存。"
+        } else {
+            "“测试当前配置”会使用已经保存的参数发起一次示例翻译。修改后请先保存。"
+        },
+    )
+}
+
+private fun isTranslationDraftConfigured(
+    provider: TranslationProvider,
+    azureEndpoint: String,
+    azureApiKey: String,
+    googleApiKey: String,
+): Boolean {
+    return when (provider) {
+        TranslationProvider.Disabled -> false
+        TranslationProvider.AzureTranslator -> azureEndpoint.isNotBlank() && azureApiKey.isNotBlank()
+        TranslationProvider.GoogleCloudTranslate -> googleApiKey.isNotBlank()
+        TranslationProvider.GoogleWebTranslate,
+        TranslationProvider.MicrosoftEdgeTranslate -> true
+    }
 }
 
 @Composable

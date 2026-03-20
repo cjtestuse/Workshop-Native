@@ -1,6 +1,16 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "Optional versionName override for manual builds"
+        required: false
+        type: string
+      version_code:
+        description: "Optional versionCode override for manual builds"
+        required: false
+        type: string
   push:
     tags:
       - "v*"
@@ -33,18 +43,32 @@ jobs:
 
       - name: Resolve release version
         run: |
-          VERSION_NAME="${GITHUB_REF_NAME#v}"
-          VERSION_CODE="${GITHUB_RUN_NUMBER}"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION_NAME="${GITHUB_REF_NAME#v}"
+            VERSION_CODE="${GITHUB_RUN_NUMBER}"
 
-          if [ -z "$VERSION_NAME" ] || [ "$VERSION_NAME" = "$GITHUB_REF_NAME" ]; then
-            echo "Tag must look like v1.0.1" >&2
-            exit 1
+            if [ -z "$VERSION_NAME" ] || [ "$VERSION_NAME" = "$GITHUB_REF_NAME" ]; then
+              echo "Tag must look like v1.0.1" >&2
+              exit 1
+            fi
+          else
+            VERSION_NAME="${{ inputs.version_name }}"
+            VERSION_CODE="${{ inputs.version_code }}"
+
+            if [ -z "$VERSION_NAME" ]; then
+              VERSION_NAME="manual-${GITHUB_RUN_NUMBER}"
+            fi
+
+            if [ -z "$VERSION_CODE" ]; then
+              VERSION_CODE="${GITHUB_RUN_NUMBER}"
+            fi
           fi
 
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
       - name: Extract release notes
+        if: github.event_name == 'push'
         run: |
           TAG_REF="refs/tags/$GITHUB_REF_NAME"
           TAG_OBJECT_TYPE="$(git for-each-ref "$TAG_REF" --format='%(objecttype)')"
@@ -116,7 +140,16 @@ jobs:
           cp app/build/outputs/apk/release/app-release.apk workshop-native-release.apk
           sha256sum workshop-native-release.apk > SHA256SUMS.txt
 
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: workshop-native-${{ env.VERSION_NAME }}-release
+          path: |
+            workshop-native-release.apk
+            SHA256SUMS.txt
+
       - name: Create GitHub release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}

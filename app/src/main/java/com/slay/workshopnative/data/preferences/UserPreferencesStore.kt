@@ -112,8 +112,20 @@ data class UserPreferences(
     val allowAuthenticatedDownloadFallback: Boolean = true,
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
     val workshopAutoResolveVisibleItems: Boolean = false,
+    val translationProvider: TranslationProvider = DEFAULT_TRANSLATION_PROVIDER,
+    val translationAzureEndpoint: String = DEFAULT_AZURE_TRANSLATOR_ENDPOINT,
+    val translationAzureRegion: String = "",
+    val translationAzureApiKey: String = "",
+    val translationGoogleApiKey: String = "",
     val favoriteWorkshopGames: List<FavoriteWorkshopGame> = emptyList(),
-)
+) {
+    val isTranslationConfigured: Boolean
+        get() = translationProvider.isReady(
+            azureEndpoint = translationAzureEndpoint,
+            azureApiKey = translationAzureApiKey,
+            googleApiKey = translationGoogleApiKey,
+        )
+}
 
 data class OwnedGamesSnapshot(
     val steamId64: Long = 0,
@@ -156,6 +168,10 @@ class UserPreferencesStore @Inject constructor(
         val ALLOW_AUTHENTICATED_DOWNLOAD_FALLBACK = booleanPreferencesKey("allow_authenticated_download_fallback")
         val WORKSHOP_PAGE_SIZE = intPreferencesKey("workshop_page_size")
         val WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS = booleanPreferencesKey("workshop_auto_resolve_visible_items")
+        val TRANSLATION_PROVIDER = stringPreferencesKey("translation_provider")
+        val TRANSLATION_AZURE_ENDPOINT = stringPreferencesKey("translation_azure_endpoint")
+        val TRANSLATION_AZURE_REGION = stringPreferencesKey("translation_azure_region")
+        val TRANSLATION_SECRET_VERSION = longPreferencesKey("translation_secret_version")
         val FAVORITE_WORKSHOP_GAMES_JSON = stringPreferencesKey("favorite_workshop_games_json")
         val OWNED_GAMES_SNAPSHOT_STEAM_ID64 = longPreferencesKey("owned_games_snapshot_steam_id64")
         val OWNED_GAMES_SNAPSHOT_SAVED_AT_MS = longPreferencesKey("owned_games_snapshot_saved_at_ms")
@@ -193,6 +209,9 @@ class UserPreferencesStore @Inject constructor(
             val downloadPerformanceMode = prefs[DOWNLOAD_PERFORMANCE_MODE]
                 ?.let { value -> runCatching { DownloadPerformanceMode.valueOf(value) }.getOrNull() }
                 ?: DownloadPerformanceMode.Auto
+            val translationProvider = prefs[TRANSLATION_PROVIDER]
+                ?.let { value -> runCatching { TranslationProvider.valueOf(value) }.getOrNull() }
+                ?: DEFAULT_TRANSLATION_PROVIDER
             val savedAccounts = if (isLoginFeatureEnabled) {
                 buildSavedAccounts(
                     accountName = actualActiveSessionProfile.accountName,
@@ -241,6 +260,14 @@ class UserPreferencesStore @Inject constructor(
                     prefs[WORKSHOP_PAGE_SIZE] ?: WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
                 ),
                 workshopAutoResolveVisibleItems = prefs[WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS] ?: false,
+                translationProvider = translationProvider,
+                translationAzureEndpoint = prefs[TRANSLATION_AZURE_ENDPOINT]
+                    ?.trim()
+                    ?.takeIf(String::isNotBlank)
+                    ?: DEFAULT_AZURE_TRANSLATOR_ENDPOINT,
+                translationAzureRegion = prefs[TRANSLATION_AZURE_REGION]?.trim().orEmpty(),
+                translationAzureApiKey = secureSessionStore.readTranslationAzureApiKey(),
+                translationGoogleApiKey = secureSessionStore.readTranslationGoogleApiKey(),
                 favoriteWorkshopGames = decodeFavoriteWorkshopGames(prefs[FAVORITE_WORKSHOP_GAMES_JSON]),
             )
         }
@@ -566,6 +593,54 @@ class UserPreferencesStore @Inject constructor(
     suspend fun saveWorkshopAutoResolveVisibleItems(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS] = enabled
+        }
+    }
+
+    suspend fun saveTranslationProvider(provider: TranslationProvider) {
+        dataStore.edit { prefs ->
+            prefs[TRANSLATION_PROVIDER] = provider.name
+        }
+    }
+
+    suspend fun saveTranslationAzureEndpoint(endpoint: String) {
+        dataStore.edit { prefs ->
+            prefs[TRANSLATION_AZURE_ENDPOINT] = endpoint
+                .trim()
+                .ifBlank { DEFAULT_AZURE_TRANSLATOR_ENDPOINT }
+        }
+    }
+
+    suspend fun saveTranslationAzureRegion(region: String) {
+        dataStore.edit { prefs ->
+            prefs[TRANSLATION_AZURE_REGION] = region.trim()
+        }
+    }
+
+    suspend fun saveTranslationAzureApiKey(apiKey: String) {
+        migrateLegacySecretsIfNeeded()
+        secureSessionStore.writeTranslationAzureApiKey(apiKey.trim())
+        dataStore.edit { prefs ->
+            prefs[TRANSLATION_SECRET_VERSION] = System.currentTimeMillis()
+        }
+    }
+
+    suspend fun saveTranslationGoogleApiKey(apiKey: String) {
+        migrateLegacySecretsIfNeeded()
+        secureSessionStore.writeTranslationGoogleApiKey(apiKey.trim())
+        dataStore.edit { prefs ->
+            prefs[TRANSLATION_SECRET_VERSION] = System.currentTimeMillis()
+        }
+    }
+
+    suspend fun clearTranslationSettings() {
+        migrateLegacySecretsIfNeeded()
+        secureSessionStore.clearTranslationAzureApiKey()
+        secureSessionStore.clearTranslationGoogleApiKey()
+        dataStore.edit { prefs ->
+            prefs[TRANSLATION_PROVIDER] = TranslationProvider.Disabled.name
+            prefs[TRANSLATION_AZURE_ENDPOINT] = DEFAULT_AZURE_TRANSLATOR_ENDPOINT
+            prefs[TRANSLATION_AZURE_REGION] = ""
+            prefs[TRANSLATION_SECRET_VERSION] = System.currentTimeMillis()
         }
     }
 

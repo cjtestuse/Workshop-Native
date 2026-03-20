@@ -4,6 +4,8 @@ import com.slay.workshopnative.data.repository.DownloadsRepository
 import com.slay.workshopnative.data.repository.DownloadsRepositoryImpl
 import com.slay.workshopnative.data.repository.SteamRepository
 import com.slay.workshopnative.data.repository.SteamRepositoryImpl
+import com.slay.workshopnative.data.repository.TranslationRepository
+import com.slay.workshopnative.data.repository.TranslationRepositoryImpl
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -25,4 +27,10 @@ abstract class RepositoryModule {
     abstract fun bindDownloadsRepository(
         impl: DownloadsRepositoryImpl,
     ): DownloadsRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindTranslationRepository(
+        impl: TranslationRepositoryImpl,
+    ): TranslationRepository
 }

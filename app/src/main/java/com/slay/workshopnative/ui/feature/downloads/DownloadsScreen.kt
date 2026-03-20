@@ -41,7 +41,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -74,6 +73,7 @@ import com.slay.workshopnative.data.local.DownloadAuthMode
 import com.slay.workshopnative.data.local.DownloadStatus
 import com.slay.workshopnative.data.local.DownloadTaskEntity
 import com.slay.workshopnative.ui.components.ArtworkThumbnail
+import com.slay.workshopnative.ui.components.WorkshopNativeModalBottomSheet
 import com.slay.workshopnative.ui.components.steamCapsuleUrl
 import java.io.File
 import java.net.URI
@@ -331,13 +331,13 @@ fun DownloadsScreen(
     }
 
     selectedTask?.let { task ->
-        ModalBottomSheet(onDismissRequest = { selectedTaskId = null }) {
+        WorkshopNativeModalBottomSheet(onDismissRequest = { selectedTaskId = null }) {
             DownloadTaskSheet(task = task)
         }
     }
 
     previewTask?.let { task ->
-        ModalBottomSheet(onDismissRequest = { previewTaskId = null }) {
+        WorkshopNativeModalBottomSheet(onDismissRequest = { previewTaskId = null }) {
             DownloadResultSheet(task = task)
         }
     }

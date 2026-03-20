@@ -35,7 +35,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -62,11 +61,14 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.slay.workshopnative.core.util.textFingerprint
 import com.slay.workshopnative.data.model.FavoriteWorkshopGame
 import com.slay.workshopnative.data.model.GameDetails
 import com.slay.workshopnative.data.model.OwnedGame
 import com.slay.workshopnative.ui.components.ArtworkThumbnail
 import com.slay.workshopnative.ui.components.ExpandableBodyText
+import com.slay.workshopnative.ui.components.TranslatableDescriptionCard
+import com.slay.workshopnative.ui.components.WorkshopNativeModalBottomSheet
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -284,10 +286,14 @@ fun LibraryScreen(
     selectedGame.value?.let { game ->
         val details = state.gameDetailsByAppId[game.appId]
         val isLoadingDetails = state.loadingDetailsAppId == game.appId && details == null
-        ModalBottomSheet(onDismissRequest = { selectedGame.value = null }) {
+        val description = details?.about?.ifBlank { details.shortDescription }.orEmpty()
+        val translationState = state.descriptionTranslationByAppId[game.appId]
+            ?.takeIf { it.sourceFingerprint == textFingerprint(description.trim()) }
+        WorkshopNativeModalBottomSheet(onDismissRequest = { selectedGame.value = null }) {
             GameDetailsSheet(
                 game = game,
                 details = details,
+                translationState = translationState,
                 isLoading = isLoadingDetails,
                 isFavorite = game.appId in favoriteAppIds,
                 onToggleFavorite = {
@@ -298,6 +304,15 @@ fun LibraryScreen(
                         previewUrl = game.iconUrl.ifBlank { null },
                     )
                 },
+                onTranslateDescription = {
+                    viewModel.translateGameDescription(
+                        appId = game.appId,
+                        sourceText = description,
+                        forceRefresh = !translationState?.translatedText.isNullOrBlank(),
+                    )
+                },
+                onShowOriginalDescription = { viewModel.showOriginalGameDescription(game.appId) },
+                onShowTranslatedDescription = { viewModel.showTranslatedGameDescription(game.appId) },
                 onOpenWorkshop = {
                     selectedGame.value = null
                     viewModel.markWorkshopOpened(game.appId)
@@ -664,9 +679,13 @@ private fun GameRow(
 private fun GameDetailsSheet(
     game: OwnedGame,
     details: GameDetails?,
+    translationState: com.slay.workshopnative.ui.InlineTranslationState?,
     isLoading: Boolean,
     isFavorite: Boolean,
     onToggleFavorite: () -> Unit,
+    onTranslateDescription: () -> Unit,
+    onShowOriginalDescription: () -> Unit,
+    onShowTranslatedDescription: () -> Unit,
     onOpenWorkshop: () -> Unit,
     onOpenSubscriptions: () -> Unit,
     showSubscriptionEntry: Boolean,
@@ -764,26 +783,20 @@ private fun GameDetailsSheet(
                     genres = details.genres,
                 )
                 if (description.isNotBlank()) {
-                    Surface(
-                        color = Color.White.copy(alpha = 0.78f),
-                        shape = RoundedCornerShape(24.dp),
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Text(
-                                text = "游戏介绍",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            ExpandableBodyText(
-                                text = description,
-                                collapsedMaxLines = 7,
-                            )
-                        }
-                    }
+                    TranslatableDescriptionCard(
+                        title = "游戏介绍",
+                        originalText = description,
+                        translatedText = translationState?.translatedText,
+                        providerLabel = translationState?.providerLabel,
+                        sourceLanguageLabel = translationState?.sourceLanguageLabel,
+                        isTranslating = translationState?.isTranslating == true,
+                        showTranslated = translationState?.showTranslated == true,
+                        errorMessage = translationState?.errorMessage,
+                        collapsedMaxLines = 7,
+                        onTranslate = onTranslateDescription,
+                        onShowOriginal = onShowOriginalDescription,
+                        onShowTranslated = onShowTranslatedDescription,
+                    )
                 }
             }
 

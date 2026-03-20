@@ -92,6 +92,26 @@ class SecureSessionStore @Inject constructor(
         removeSecret(OWNED_GAMES_SNAPSHOT_PAYLOAD_KEY)
     }
 
+    fun readTranslationAzureApiKey(): String = readSecret(TRANSLATION_AZURE_API_KEY)
+
+    fun writeTranslationAzureApiKey(value: String) {
+        writeSecret(TRANSLATION_AZURE_API_KEY, value)
+    }
+
+    fun clearTranslationAzureApiKey() {
+        removeSecret(TRANSLATION_AZURE_API_KEY)
+    }
+
+    fun readTranslationGoogleApiKey(): String = readSecret(TRANSLATION_GOOGLE_API_KEY)
+
+    fun writeTranslationGoogleApiKey(value: String) {
+        writeSecret(TRANSLATION_GOOGLE_API_KEY, value)
+    }
+
+    fun clearTranslationGoogleApiKey() {
+        removeSecret(TRANSLATION_GOOGLE_API_KEY)
+    }
+
     fun readSavedAccountRefreshToken(accountIdentityKey: String): String {
         val currentStorageKey = savedAccountRefreshTokenKey(accountIdentityKey)
         val currentValue = readSecret(currentStorageKey)
@@ -244,6 +264,8 @@ class SecureSessionStore @Inject constructor(
         const val ACTIVE_SESSION_PROFILE_KEY = "active_session_profile"
         const val SAVED_ACCOUNTS_METADATA_KEY = "saved_accounts_metadata"
         const val OWNED_GAMES_SNAPSHOT_PAYLOAD_KEY = "owned_games_snapshot_payload"
+        const val TRANSLATION_AZURE_API_KEY = "translation_azure_api_key"
+        const val TRANSLATION_GOOGLE_API_KEY = "translation_google_api_key"
         const val SAVED_ACCOUNT_REFRESH_TOKEN_KEY_PREFIX = "saved_account_refresh_token."
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val GCM_IV_SIZE_BYTES = 12
