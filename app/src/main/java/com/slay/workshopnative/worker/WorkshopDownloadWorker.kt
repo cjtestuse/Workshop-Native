@@ -14,12 +14,15 @@ import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.slay.workshopnative.core.logging.AppLog as Log
+import com.slay.workshopnative.core.logging.SupportDiagnosticsStore
 import com.slay.workshopnative.core.storage.clearDownloadStaging
 import com.slay.workshopnative.core.storage.copyLocalFileToUri
 import com.slay.workshopnative.core.storage.createMediaStoreFileUri
 import com.slay.workshopnative.core.storage.directDownloadStagingFile
 import com.slay.workshopnative.core.storage.finalizeMediaStoreFile
 import com.slay.workshopnative.core.util.DownloadPausedException
+import com.slay.workshopnative.core.util.resolveAccountBindingHash
+import com.slay.workshopnative.core.util.sanitizeRuntimeSourceAddress
 import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.local.DownloadAuthMode
 import com.slay.workshopnative.data.local.DownloadStatus
@@ -48,6 +51,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
     private val downloadTaskDao: DownloadTaskDao,
     private val okHttpClient: OkHttpClient,
     private val steamSessionManager: SteamSessionManager,
+    private val supportDiagnosticsStore: SupportDiagnosticsStore,
 ) : CoroutineWorker(appContext, workerParams) {
 
     private data class RuntimeInfoState(
@@ -74,6 +78,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
         const val KEY_PUBLISHED_FILE_ID = "published_file_id"
         const val KEY_CONTENT_MANIFEST_ID = "content_manifest_id"
         const val KEY_DOWNLOAD_AUTH_MODE = "download_auth_mode"
+        const val KEY_BOUND_ACCOUNT_KEY_HASH = "bound_account_key_hash"
         const val KEY_BOUND_ACCOUNT_NAME = "bound_account_name"
         const val KEY_BOUND_STEAM_ID64 = "bound_steam_id64"
         private const val DIRECT_STREAM_BUFFER_SIZE = 1024 * 1024
@@ -105,6 +110,23 @@ class WorkshopDownloadWorker @AssistedInject constructor(
             ?: DownloadAuthMode.Anonymous
         val boundAccountName = inputData.getString(KEY_BOUND_ACCOUNT_NAME)
         val boundSteamId64 = inputData.getLong(KEY_BOUND_STEAM_ID64, 0L).takeIf { it > 0L }
+        val boundAccountKeyHash = resolveAccountBindingHash(
+            boundAccountKeyHash = inputData.getString(KEY_BOUND_ACCOUNT_KEY_HASH),
+            boundAccountName = boundAccountName,
+            boundSteamId64 = boundSteamId64,
+        )
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "worker_start",
+            taskId = taskId,
+            fields = mapOf(
+                "publishedFileId" to publishedFileId.toString(),
+                "appId" to appId.toString(),
+                "hasUrl" to url.isNotBlank().toString(),
+                "manifest" to contentManifestId.toString(),
+                "authMode" to downloadAuthMode.name,
+                "hasBindingHash" to (!boundAccountKeyHash.isNullOrBlank()).toString(),
+            ),
+        )
         pauseStatePoller = PauseStatePoller(taskId)
         Log.i(
             LOG_TAG,
@@ -146,14 +168,22 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                 publishedFileId = publishedFileId,
                 contentManifestId = contentManifestId,
                 downloadAuthMode = downloadAuthMode,
-                boundAccountName = boundAccountName,
-                boundSteamId64 = boundSteamId64,
+                boundAccountKeyHash = boundAccountKeyHash,
                 existing = existing,
             )
 
             Log.i(
                 LOG_TAG,
                 "doWork success taskId=$taskId publishedFileId=$publishedFileId bytes=${completed.bytesDownloaded}/${completed.totalBytes}",
+            )
+            supportDiagnosticsStore.recordDownloadEvent(
+                action = "worker_success",
+                taskId = taskId,
+                fields = mapOf(
+                    "publishedFileId" to publishedFileId.toString(),
+                    "bytesDownloaded" to completed.bytesDownloaded.toString(),
+                    "totalBytes" to completed.totalBytes.toString(),
+                ),
             )
 
             downloadTaskDao.finish(
@@ -173,8 +203,19 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                 val isPaused = throwable.isPauseSignal() || latest.pauseRequested
                 if (isPaused) {
                     Log.i(LOG_TAG, "Download paused taskId=$taskId")
+                    supportDiagnosticsStore.recordDownloadEvent(
+                        action = "worker_paused",
+                        taskId = taskId,
+                    )
                 } else {
                     Log.e(LOG_TAG, "Download failed taskId=$taskId", throwable)
+                    supportDiagnosticsStore.recordDownloadEvent(
+                        action = "worker_failed",
+                        taskId = taskId,
+                        fields = mapOf(
+                            "message" to (throwable.message ?: throwable.javaClass.simpleName),
+                        ),
+                    )
                 }
                 val status = when {
                     isPaused -> DownloadStatus.Paused
@@ -222,11 +263,18 @@ class WorkshopDownloadWorker @AssistedInject constructor(
         publishedFileId: Long,
         contentManifestId: Long,
         downloadAuthMode: DownloadAuthMode,
-        boundAccountName: String?,
-        boundSteamId64: Long?,
+        boundAccountKeyHash: String?,
         existing: DownloadTaskEntity,
     ): CompletedDownload {
         if (contentManifestId > 0L && appId > 0) {
+            supportDiagnosticsStore.recordDownloadEvent(
+                action = "steam_download_attempt",
+                taskId = taskId,
+                fields = mapOf(
+                    "publishedFileId" to publishedFileId.toString(),
+                    "authMode" to downloadAuthMode.name,
+                ),
+            )
             val steamResult = runCatching {
                 runSteamWorkshopDownload(
                     taskId = taskId,
@@ -240,8 +288,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                     fallbackTotalBytes = existing.totalBytes,
                     existing = existing,
                     downloadAuthMode = downloadAuthMode,
-                    boundAccountName = boundAccountName,
-                    boundSteamId64 = boundSteamId64,
+                    boundAccountKeyHash = boundAccountKeyHash,
                 )
             }
             if (steamResult.isSuccess) {
@@ -257,6 +304,14 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                 LOG_TAG,
                 "Steam content download failed, fallback to direct url taskId=$taskId publishedFileId=$publishedFileId",
                 steamFailure,
+            )
+            supportDiagnosticsStore.recordDownloadEvent(
+                action = "steam_download_fallback_to_direct",
+                taskId = taskId,
+                fields = mapOf(
+                    "publishedFileId" to publishedFileId.toString(),
+                    "message" to (steamFailure?.message ?: steamFailure?.javaClass?.simpleName),
+                ),
             )
             val latest = downloadTaskDao.getById(taskId) ?: existing
             if (latest.storageRootRef != null) {
@@ -302,6 +357,11 @@ class WorkshopDownloadWorker @AssistedInject constructor(
         downloadFolderName: String?,
         existing: DownloadTaskEntity,
     ): CompletedDownload {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "direct_download_start",
+            taskId = taskId,
+            fields = mapOf("sourceAddress" to (sanitizeRuntimeSourceAddress(url) ?: "unknown")),
+        )
         val progressReporter = RunningProgressReporter(taskId = taskId, title = title)
         updateRuntimeInfo(
             taskId = taskId,
@@ -484,8 +544,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
         fallbackTotalBytes: Long,
         existing: DownloadTaskEntity,
         downloadAuthMode: DownloadAuthMode,
-        boundAccountName: String?,
-        boundSteamId64: Long?,
+        boundAccountKeyHash: String?,
     ): CompletedDownload {
         var bytesDownloaded = 0L
         var totalBytes = fallbackTotalBytes.coerceAtLeast(0L)
@@ -516,8 +575,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                 rootName = rootName,
                 existingRootRef = existing.storageRootRef,
                 downloadAuthMode = downloadAuthMode,
-                boundAccountName = boundAccountName,
-                boundSteamId64 = boundSteamId64,
+                boundAccountKeyHash = boundAccountKeyHash,
                 onStorageRootResolved = { rootRef ->
                     val latest = downloadTaskDao.getById(taskId) ?: existing
                     if (latest.storageRootRef != rootRef) {
@@ -626,7 +684,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
             routeLabel = routeLabel ?: runtimeInfoState.routeLabel,
             transportLabel = transportLabel ?: runtimeInfoState.transportLabel,
             endpointLabel = endpointLabel ?: runtimeInfoState.endpointLabel,
-            sourceAddress = sourceAddress ?: runtimeInfoState.sourceAddress,
+            sourceAddress = sanitizeRuntimeSourceAddress(sourceAddress) ?: runtimeInfoState.sourceAddress,
             attemptCount = attemptCount ?: runtimeInfoState.attemptCount,
             chunkConcurrency = chunkConcurrency ?: runtimeInfoState.chunkConcurrency,
             lastFailure = lastFailure,

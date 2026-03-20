@@ -33,6 +33,7 @@ data class DownloadTaskEntity(
     val storageRootRef: String?,
     val destinationLabel: String,
     val downloadAuthMode: DownloadAuthMode,
+    val boundAccountKeyHash: String?,
     val boundAccountName: String?,
     val boundSteamId64: Long?,
     val runtimeRouteLabel: String?,

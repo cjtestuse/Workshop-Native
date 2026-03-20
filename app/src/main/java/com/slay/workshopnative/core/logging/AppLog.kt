@@ -116,7 +116,15 @@ object AppLog {
         }
     }
 
-    suspend fun exportToUri(targetUri: Uri): Result<AppLogExportResult> = withContext(Dispatchers.IO) {
+    suspend fun exportToUri(targetUri: Uri): Result<AppLogExportResult> = exportSupportBundle(
+        targetUri = targetUri,
+        extraEntries = emptyList(),
+    )
+
+    suspend fun exportSupportBundle(
+        targetUri: Uri,
+        extraEntries: List<SupportBundleTextEntry>,
+    ): Result<AppLogExportResult> = withContext(Dispatchers.IO) {
         runCatching {
             val context = appContext ?: error("Logger is not initialized")
             val snapshot = synchronized(lock) {
@@ -140,12 +148,12 @@ object AppLog {
                 exportDir(context),
                 EXPORT_FILE_PREFIX + fileTimestamp(snapshot.createdAtMillis) + EXPORT_FILE_EXTENSION,
             )
-            buildExportZip(exportFile, snapshot)
+            buildExportZip(exportFile, snapshot, extraEntries)
             try {
                 copyLocalFileToUri(context, exportFile, targetUri)
                 AppLogExportResult(
                     fileName = exportFile.name,
-                    exportedEntryCount = snapshot.runtimeFiles.size + snapshot.crashFiles.size + 1,
+                    exportedEntryCount = snapshot.runtimeFiles.size + snapshot.crashFiles.size + 1 + extraEntries.size,
                     totalBytes = exportFile.length(),
                 )
             } finally {
@@ -300,6 +308,7 @@ object AppLog {
     private fun buildExportZip(
         exportFile: File,
         snapshot: ExportSnapshot,
+        extraEntries: List<SupportBundleTextEntry>,
     ) {
         exportFile.parentFile?.mkdirs()
         ZipOutputStream(exportFile.outputStream().buffered()).use { zip ->
@@ -313,6 +322,13 @@ object AppLog {
             }
             snapshot.crashFiles.forEach { file ->
                 addFileEntry(zip, "crash/${file.name}", file)
+            }
+            extraEntries.forEach { entry ->
+                addTextEntry(
+                    zip = zip,
+                    name = entry.name,
+                    payload = entry.payload,
+                )
             }
         }
     }

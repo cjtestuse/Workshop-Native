@@ -176,7 +176,8 @@ fun WorkshopScreen(
         }
     }
 
-    LaunchedEffect(listState, state.items) {
+    LaunchedEffect(listState, state.items, state.autoResolveDownloadInfo) {
+        if (!state.autoResolveDownloadInfo) return@LaunchedEffect
         snapshotFlow {
             listState.layoutInfo.visibleItemsInfo
                 .mapNotNull { info -> state.items.getOrNull(info.index)?.publishedFileId }
@@ -244,6 +245,7 @@ fun WorkshopScreen(
                 WorkshopLoadingCard(
                     modifier = Modifier.weight(1f),
                     appName = state.appName,
+                    autoResolveDownloadInfo = state.autoResolveDownloadInfo,
                 )
             } else if (state.items.isEmpty()) {
                 if (isSubscriptionMode) {
@@ -443,6 +445,7 @@ fun WorkshopScreen(
 private fun WorkshopLoadingCard(
     modifier: Modifier = Modifier,
     appName: String,
+    autoResolveDownloadInfo: Boolean,
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -467,7 +470,11 @@ private fun WorkshopLoadingCard(
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = "正在加载 Steam 列表，下载方式会在列表出现后继续补齐。",
+                text = if (autoResolveDownloadInfo) {
+                    "正在加载 Steam 列表，可见条目的下载方式会在列表出现后继续补齐。"
+                } else {
+                    "正在加载 Steam 列表，条目详情和下载方式会在点开时按需补齐。"
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

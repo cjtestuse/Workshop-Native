@@ -3,14 +3,25 @@ package com.slay.workshopnative.ui.feature.settings
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.slay.workshopnative.core.logging.SupportBundleTextEntry
+import com.slay.workshopnative.core.logging.SupportCdnExportSnapshot
+import com.slay.workshopnative.core.logging.SupportDiagnosticsSnapshot
+import com.slay.workshopnative.core.logging.SupportDiagnosticsStore
+import com.slay.workshopnative.core.logging.SupportDownloadTaskSnapshot
+import com.slay.workshopnative.core.logging.SupportSessionSnapshot
+import com.slay.workshopnative.core.logging.SupportSettingsSnapshot
 import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.core.storage.DEFAULT_DOWNLOAD_FOLDER_NAME
 import com.slay.workshopnative.core.storage.normalizeDownloadFolderName
+import com.slay.workshopnative.core.util.buildAccountBindingHash
+import com.slay.workshopnative.core.util.sanitizeRuntimeSourceAddress
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
 import com.slay.workshopnative.data.preferences.DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY
 import com.slay.workshopnative.data.preferences.DownloadPerformanceMode
+import com.slay.workshopnative.data.local.DownloadTaskDao
+import com.slay.workshopnative.data.local.DownloadTaskEntity
 import com.slay.workshopnative.data.repository.DownloadsRepository
 import com.slay.workshopnative.data.repository.SteamRepository
 import com.slay.workshopnative.data.preferences.SavedSteamAccount
@@ -33,6 +44,8 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import javax.inject.Inject
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 data class SupportLogUiState(
     val runtimeLogCount: Int = 0,
@@ -75,7 +88,7 @@ data class SettingsUiState(
     val cdnTransportPreference: CdnTransportPreference = CdnTransportPreference.Auto,
     val cdnPoolPreference: CdnPoolPreference = CdnPoolPreference.Auto,
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
-    val workshopAutoResolveVisibleItems: Boolean = true,
+    val workshopAutoResolveVisibleItems: Boolean = false,
     val supportLogs: SupportLogUiState = SupportLogUiState(),
     val maintenanceSummary: String? = null,
 )
@@ -85,13 +98,22 @@ class SettingsViewModel @Inject constructor(
     private val preferencesStore: UserPreferencesStore,
     private val steamRepository: SteamRepository,
     private val downloadsRepository: DownloadsRepository,
+    private val downloadTaskDao: DownloadTaskDao,
     private val okHttpClient: OkHttpClient,
+    private val supportDiagnosticsStore: SupportDiagnosticsStore,
+    private val json: Json,
 ) : ViewModel() {
+    private data class AvatarCacheEntry(
+        val steamId64: Long,
+        val avatarUrl: String?,
+        val fetchedAtMs: Long,
+    )
 
     private val avatarUrl = MutableStateFlow<String?>(null)
     private val maintenanceState = MutableStateFlow(MaintenanceUiState())
     private val supportLogsState = MutableStateFlow(SupportLogUiState())
     private val preferences = preferencesStore.preferences
+    private var avatarCacheEntry: AvatarCacheEntry? = null
 
     val uiState: StateFlow<SettingsUiState> = combine(
         preferences,
@@ -200,6 +222,7 @@ class SettingsViewModel @Inject constructor(
                 downloadsRepository.enforceAnonymousOnly("已关闭登录功能，涉及账号的下载任务已停止")
                 steamRepository.logout()
                 avatarUrl.value = null
+                avatarCacheEntry = null
             }
             maintenanceState.value = MaintenanceUiState(
                 summary = if (enabled) {
@@ -308,6 +331,13 @@ class SettingsViewModel @Inject constructor(
     fun saveWorkshopAutoResolveVisibleItems(enabled: Boolean) {
         viewModelScope.launch {
             preferencesStore.saveWorkshopAutoResolveVisibleItems(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启列表预读。当前可见工坊条目的下载方式会提前检测，请求量会略高。"
+                } else {
+                    "已关闭列表预读。工坊列表会先轻量加载，详情和下载方式改为点开后再检测。"
+                },
+            )
         }
     }
 
@@ -360,6 +390,7 @@ class SettingsViewModel @Inject constructor(
             steamRepository.logout()
             preferencesStore.clearAllAccountData()
             avatarUrl.value = null
+            avatarCacheEntry = null
             maintenanceState.value = MaintenanceUiState(
                 summary = "已清除本地保存的登录状态、已保存账号和游戏库快照。",
             )
@@ -369,7 +400,32 @@ class SettingsViewModel @Inject constructor(
     fun exportSupportLogs(targetUri: Uri) {
         viewModelScope.launch {
             supportLogsState.value = supportLogsState.value.copy(isExporting = true)
-            val result = AppLog.exportToUri(targetUri)
+            val result = runCatching {
+                val exportedAtMs = System.currentTimeMillis()
+                val prefs = preferencesStore.snapshot()
+                val session = steamRepository.sessionState.value
+                val tasks = withContext(Dispatchers.IO) { downloadTaskDao.getAll() }
+                val diagnosticsSnapshot = supportDiagnosticsStore.snapshot()
+                val extraEntries = buildSupportBundleEntries(
+                    exportedAtMs = exportedAtMs,
+                    prefs = prefs,
+                    sessionStatus = session.status.name,
+                    connectionRevision = session.connectionRevision,
+                    hasAccount = session.account != null,
+                    currentAccountBindingHash = buildAccountBindingHash(
+                        accountName = session.account?.accountName ?: prefs.accountName,
+                        steamId64 = session.account?.steamId64 ?: prefs.steamId64,
+                    ),
+                    hasRefreshToken = prefs.refreshToken.isNotBlank(),
+                    savedAccountsCount = prefs.savedAccounts.size,
+                    downloads = tasks,
+                    diagnosticsSnapshot = diagnosticsSnapshot,
+                )
+                AppLog.exportSupportBundle(
+                    targetUri = targetUri,
+                    extraEntries = extraEntries,
+                ).getOrThrow()
+            }
             supportLogsState.value = supportLogsState.value.copy(isExporting = false)
             maintenanceState.value = MaintenanceUiState(
                 summary = result.fold(
@@ -429,6 +485,14 @@ class SettingsViewModel @Inject constructor(
 
     private suspend fun fetchAvatarUrl(steamId64: Long): String? {
         if (steamId64 <= 0L) return null
+        avatarCacheEntry
+            ?.takeIf { cached ->
+                cached.steamId64 == steamId64 &&
+                    System.currentTimeMillis() - cached.fetchedAtMs <= AVATAR_CACHE_TTL_MS
+            }
+            ?.let { cached ->
+                return cached.avatarUrl
+            }
         return withContext(Dispatchers.IO) {
             runCatching {
                 val request = Request.Builder()
@@ -440,14 +504,21 @@ class SettingsViewModel @Inject constructor(
                     val payload = response.body?.string().orEmpty()
                     AVATAR_REGEX.find(payload)?.groupValues?.getOrNull(1)
                 }
+            }.onSuccess { resolvedUrl ->
+                avatarCacheEntry = AvatarCacheEntry(
+                    steamId64 = steamId64,
+                    avatarUrl = resolvedUrl,
+                    fetchedAtMs = System.currentTimeMillis(),
+                )
             }.onFailure { error ->
-                AppLog.w(LOG_TAG, "fetchAvatarUrl failed steamId64=$steamId64", error)
+                AppLog.w(LOG_TAG, "fetchAvatarUrl failed", error)
             }.getOrNull()
         }
     }
 
     private companion object {
         const val LOG_TAG = "SettingsViewModel"
+        const val AVATAR_CACHE_TTL_MS = 12 * 60 * 60 * 1000L
         val AVATAR_REGEX = Regex("<avatarFull><!\\[CDATA\\[(.*?)]]></avatarFull>")
         val DATE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter
             .ofPattern("yyyy-MM-dd HH:mm", Locale.CHINA)
@@ -488,6 +559,132 @@ class SettingsViewModel @Inject constructor(
             isExporting = isExporting,
         )
     }
+
+    private fun buildSupportBundleEntries(
+        exportedAtMs: Long,
+        prefs: UserPreferences,
+        sessionStatus: String,
+        connectionRevision: Long,
+        hasAccount: Boolean,
+        currentAccountBindingHash: String?,
+        hasRefreshToken: Boolean,
+        savedAccountsCount: Int,
+        downloads: List<DownloadTaskEntity>,
+        diagnosticsSnapshot: SupportDiagnosticsSnapshot,
+    ): List<SupportBundleTextEntry> {
+        val downloadSnapshots = downloads
+            .sortedByDescending(DownloadTaskEntity::createdAt)
+            .map(::toSupportDownloadTaskSnapshot)
+        val sessionSnapshot = SupportSessionSnapshot(
+            exportedAtMs = exportedAtMs,
+            sessionStatus = sessionStatus,
+            connectionRevision = connectionRevision,
+            hasAccount = hasAccount,
+            hasRefreshToken = hasRefreshToken,
+            isGuestMode = sessionStatus != "Authenticated",
+            savedAccountsCount = savedAccountsCount,
+            currentAccountBindingHashPrefix = currentAccountBindingHash?.take(12),
+        )
+        val settingsSnapshot = SupportSettingsSnapshot(
+            exportedAtMs = exportedAtMs,
+            isLoginFeatureEnabled = prefs.isLoginFeatureEnabled,
+            isLoggedInDownloadEnabled = prefs.isLoggedInDownloadEnabled,
+            isOwnedGamesDisplayEnabled = prefs.isOwnedGamesDisplayEnabled,
+            isSubscriptionDisplayEnabled = prefs.isSubscriptionDisplayEnabled,
+            autoCheckAppUpdates = prefs.autoCheckAppUpdates,
+            defaultGuestMode = prefs.defaultGuestMode,
+            preferAnonymousDownloads = prefs.preferAnonymousDownloads,
+            allowAuthenticatedDownloadFallback = prefs.allowAuthenticatedDownloadFallback,
+            cdnTransportPreference = prefs.cdnTransportPreference.name,
+            cdnPoolPreference = prefs.cdnPoolPreference.name,
+            downloadPerformanceMode = prefs.downloadPerformanceMode.name,
+            requestedChunkConcurrency = prefs.downloadChunkConcurrency,
+            workshopPageSize = prefs.workshopPageSize,
+            workshopAutoResolveVisibleItems = prefs.workshopAutoResolveVisibleItems,
+            hasCustomDownloadTree = !prefs.downloadTreeUri.isNullOrBlank(),
+            hasCustomDownloadFolderName = prefs.downloadFolderName != DEFAULT_DOWNLOAD_FOLDER_NAME,
+        )
+        return listOf(
+            SupportBundleTextEntry(
+                name = "diagnostics/downloads_snapshot.json",
+                payload = json.encodeToString(downloadSnapshots),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/download_timeline.jsonl",
+                payload = diagnosticsSnapshot.downloadTimeline.toJsonLines(json),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/download_decisions.json",
+                payload = json.encodeToString(diagnosticsSnapshot.downloadDecisions),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/cdn_summary.json",
+                payload = json.encodeToString(
+                    SupportCdnExportSnapshot(
+                        tasks = diagnosticsSnapshot.cdnTaskSummaries,
+                        hosts = diagnosticsSnapshot.cdnHostSnapshots,
+                    ),
+                ),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/performance_snapshot.json",
+                payload = json.encodeToString(diagnosticsSnapshot.performanceSnapshots),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/session_snapshot.json",
+                payload = json.encodeToString(sessionSnapshot),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/app_settings_snapshot.json",
+                payload = json.encodeToString(settingsSnapshot),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/traffic_summary.json",
+                payload = json.encodeToString(diagnosticsSnapshot.trafficCounters),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/search_summary.json",
+                payload = json.encodeToString(diagnosticsSnapshot.searchSamples),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/recovery_timeline.jsonl",
+                payload = diagnosticsSnapshot.recoveryTimeline.toJsonLines(json),
+            ),
+        )
+    }
+
+    private fun toSupportDownloadTaskSnapshot(task: DownloadTaskEntity): SupportDownloadTaskSnapshot {
+        val savedFileScheme = task.savedFileUri
+            ?.let { uri -> runCatching { Uri.parse(uri).scheme }.getOrNull() }
+        return SupportDownloadTaskSnapshot(
+            taskId = task.taskId,
+            publishedFileId = task.publishedFileId,
+            appId = task.appId,
+            title = task.title,
+            status = task.status.name,
+            downloadAuthMode = task.downloadAuthMode.name,
+            boundAccountHashPrefix = task.boundAccountKeyHash?.take(12),
+            progressPercent = task.progressPercent,
+            bytesDownloaded = task.bytesDownloaded,
+            totalBytes = task.totalBytes,
+            createdAt = task.createdAt,
+            updatedAt = task.updatedAt,
+            errorMessage = task.errorMessage,
+            sourceAddress = exportSanitizedSourceAddress(task.sourceUrl),
+            destinationType = task.exportDestinationType(),
+            hasSavedFile = !task.savedFileUri.isNullOrBlank(),
+            savedFileScheme = savedFileScheme,
+            hasTargetTree = !task.targetTreeUri.isNullOrBlank(),
+            storageRootKind = task.exportStorageRootKind(),
+            runtimeRouteLabel = task.runtimeRouteLabel,
+            runtimeTransportLabel = task.runtimeTransportLabel,
+            runtimeEndpointLabel = task.runtimeEndpointLabel,
+            runtimeSourceAddress = sanitizeRuntimeSourceAddress(task.runtimeSourceAddress),
+            runtimeAttemptCount = task.runtimeAttemptCount,
+            runtimeChunkConcurrency = task.runtimeChunkConcurrency,
+            runtimeLastFailure = task.runtimeLastFailure,
+        )
+    }
 }
 
 private data class MaintenanceUiState(
@@ -509,5 +706,37 @@ private fun formatBytes(bytes: Long): String {
         bytes >= mb -> String.format(Locale.US, "%.1f MB", bytes / mb)
         bytes >= kb -> String.format(Locale.US, "%.1f KB", bytes / kb)
         else -> "$bytes B"
+    }
+}
+
+private fun List<com.slay.workshopnative.core.logging.SupportStructuredEvent>.toJsonLines(json: Json): String {
+    return joinToString(separator = "\n") { item ->
+        json.encodeToString(item)
+    }
+}
+
+private fun exportSanitizedSourceAddress(sourceUrl: String?): String? {
+    if (sourceUrl.isNullOrBlank()) return null
+    return sanitizeRuntimeSourceAddress(sourceUrl)
+}
+
+private fun DownloadTaskEntity.exportDestinationType(): String {
+    return when {
+        !targetTreeUri.isNullOrBlank() -> "TreeUri"
+        savedFileUri == null -> "Pending"
+        savedFileUri == com.slay.workshopnative.core.storage.MEDIASTORE_DOWNLOADS_URI_STRING ||
+            savedFileUri.startsWith("content://media/external/downloads") -> "MediaStore"
+        savedFileUri.startsWith("file:") -> "LocalFile"
+        else -> "ContentUri"
+    }
+}
+
+private fun DownloadTaskEntity.exportStorageRootKind(): String {
+    return when {
+        storageRootRef.isNullOrBlank() -> "none"
+        storageRootRef.startsWith("tree:") -> "tree"
+        storageRootRef.startsWith("downloads:") -> "downloads"
+        storageRootRef.startsWith("local:") -> "local"
+        else -> "other"
     }
 }

@@ -69,6 +69,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.slay.workshopnative.core.logging.AppLog as Log
 import com.slay.workshopnative.core.storage.MEDIASTORE_DOWNLOADS_URI_STRING
 import com.slay.workshopnative.core.util.formatBytes
+import com.slay.workshopnative.core.util.sanitizeRuntimeSourceAddress
 import com.slay.workshopnative.data.local.DownloadAuthMode
 import com.slay.workshopnative.data.local.DownloadStatus
 import com.slay.workshopnative.data.local.DownloadTaskEntity
@@ -114,7 +115,6 @@ fun DownloadsScreen(
     viewModel: DownloadsViewModel = hiltViewModel(),
 ) {
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
-    val gameTitles by viewModel.gameTitles.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -179,16 +179,12 @@ fun DownloadsScreen(
         ?: tabStates.firstOrNull { it.count > 0 }?.tab
         ?: DownloadsTab.Active
     val selectedTabState = tabStates.first { it.tab == selectedTab }
-    val groupedDownloads = remember(selectedTabState.tasks, gameTitles) {
-        buildDownloadGroups(selectedTabState.tasks, gameTitles)
+    val groupedDownloads = remember(selectedTabState.tasks) {
+        buildDownloadGroups(selectedTabState.tasks)
     }
     val defaultExpandedForTab = selectedTab.expandsGroupsByDefault()
     var expandedGroupOverrides by remember(selectedTabState.tab) {
         mutableStateOf<Map<String, Boolean>>(emptyMap())
-    }
-
-    LaunchedEffect(downloads) {
-        viewModel.prefetchGameTitles(downloads.map(DownloadTaskEntity::appId))
     }
 
     LaunchedEffect(viewModel) {
@@ -817,8 +813,10 @@ private fun DownloadTaskSheet(
                     }
                     DetailBlock(
                         label = "源地址",
-                        value = task.runtimeSourceAddress
-                            ?: task.sourceUrl.takeUnless { it.startsWith("steam://publishedfile/") }
+                        value = sanitizeRuntimeSourceAddress(task.runtimeSourceAddress)
+                            ?: task.sourceUrl
+                                .takeUnless { it.startsWith("steam://publishedfile/") }
+                                ?.let(::sanitizeRuntimeSourceAddress)
                             ?: "已脱敏",
                     )
                     task.runtimeLastFailure?.takeIf { it.isNotBlank() }?.let { failure ->
@@ -1634,26 +1632,16 @@ private fun DownloadTaskEntity.directoryActionCompactLabel(): String {
 private fun DownloadTaskEntity.downloadAuthCompactLabel(): String {
     return when (downloadAuthMode) {
         DownloadAuthMode.Anonymous -> "匿名下载"
-        DownloadAuthMode.Auto -> boundAccountName?.takeIf { it.isNotBlank() }?.let {
-            "匿名优先·$it"
-        } ?: "匿名优先"
-        DownloadAuthMode.Authenticated -> boundAccountName?.takeIf { it.isNotBlank() }?.let {
-            "账号下载·$it"
-        } ?: "账号下载"
+        DownloadAuthMode.Auto -> "匿名优先"
+        DownloadAuthMode.Authenticated -> "账号下载"
     }
 }
 
 private fun DownloadTaskEntity.downloadAuthSummary(): String {
     return when (downloadAuthMode) {
         DownloadAuthMode.Anonymous -> "匿名下载"
-        DownloadAuthMode.Auto -> {
-            if (!boundAccountName.isNullOrBlank()) {
-                "匿名优先，必要时回退到 $boundAccountName"
-            } else {
-                "匿名优先，必要时回退到已登录账号"
-            }
-        }
-        DownloadAuthMode.Authenticated -> boundAccountName?.let { "账号下载：$it" } ?: "账号下载"
+        DownloadAuthMode.Auto -> "匿名优先，必要时回退到当前已登录账号"
+        DownloadAuthMode.Authenticated -> "账号下载（当前已登录账号）"
     }
 }
 
@@ -1665,12 +1653,10 @@ private fun DownloadTaskEntity.canDeleteIndividually(): Boolean {
 
 private fun DownloadTaskEntity.boundAccountSummary(): String {
     return when {
-        !boundAccountName.isNullOrBlank() -> boundAccountName
-        boundSteamId64 != null && boundSteamId64 > 0L -> "SteamID $boundSteamId64"
         status !in setOf(DownloadStatus.Queued, DownloadStatus.Running, DownloadStatus.Paused) &&
             downloadAuthMode != DownloadAuthMode.Anonymous -> "已脱敏"
         downloadAuthMode == DownloadAuthMode.Anonymous -> "访客"
-        else -> "当前会话"
+        else -> "当前账号"
     }
 }
 
@@ -1780,7 +1766,6 @@ private fun DownloadTaskEntity.retryActionOrNull(
 
 private fun buildDownloadGroups(
     tasks: List<DownloadTaskEntity>,
-    gameTitles: Map<Int, String>,
 ): List<DownloadGameGroup> {
     return tasks
         .groupBy { task ->
@@ -1794,7 +1779,7 @@ private fun buildDownloadGroups(
             val sortedTasks = groupTasks.sortedBy(DownloadTaskEntity::createdAt)
             val appId = groupTasks.firstOrNull()?.appId ?: 0
             val gameTitle = when {
-                appId > 0 -> gameTitles[appId] ?: "Steam App $appId"
+                appId > 0 -> "Steam App $appId"
                 else -> groupTasks.firstOrNull()?.title ?: "未分类游戏"
             }
             DownloadGameGroup(

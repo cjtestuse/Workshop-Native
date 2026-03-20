@@ -92,9 +92,6 @@ class MainViewModel @Inject constructor(
             if ((!prefs.isLoginFeatureEnabled || prefs.defaultGuestMode) && currentStatus != SessionStatus.Authenticated) {
                 _guestMode.value = true
             }
-            if (currentStatus != SessionStatus.Authenticated) {
-                steamRepository.prewarmAnonymousDownloadAccess()
-            }
             _isBootstrapping.value = false
         }
         viewModelScope.launch {
@@ -150,9 +147,6 @@ class MainViewModel @Inject constructor(
 
     fun onAppForegrounded() {
         steamRepository.onAppForegrounded()
-        if (_guestMode.value || steamRepository.sessionState.value.status != SessionStatus.Authenticated) {
-            steamRepository.prewarmAnonymousDownloadAccess()
-        }
     }
 
     fun login(username: String, password: String, rememberSession: Boolean) {
@@ -166,7 +160,6 @@ class MainViewModel @Inject constructor(
 
     fun enterGuestMode() {
         _guestMode.value = true
-        steamRepository.prewarmAnonymousDownloadAccess()
     }
 
     fun leaveGuestMode() {
@@ -184,7 +177,6 @@ class MainViewModel @Inject constructor(
         _guestMode.value = true
         viewModelScope.launch {
             steamRepository.logout()
-            steamRepository.prewarmAnonymousDownloadAccess()
         }
     }
 
@@ -227,7 +219,11 @@ class MainViewModel @Inject constructor(
             summary = if (userInitiated) "正在检查 GitHub Release…" else previousState.summary,
         )
 
-        when (val result = appUpdateService.checkForUpdates(BuildConfig.VERSION_NAME, AppUpdateSource.DEFAULT)) {
+        when (val result = appUpdateService.checkForUpdates(
+            currentVersion = BuildConfig.VERSION_NAME,
+            preferredSource = AppUpdateSource.DEFAULT,
+            validateReachability = userInitiated,
+        )) {
             is AppUpdateCheckResult.Success -> {
                 val now = System.currentTimeMillis()
                 _appUpdateState.value = _appUpdateState.value.copy(

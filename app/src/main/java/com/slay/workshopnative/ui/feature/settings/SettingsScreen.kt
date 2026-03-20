@@ -293,7 +293,7 @@ fun SettingsScreen(
                         summary = buildString {
                             append("${uiState.workshopPageSize} / 页")
                             append(" · ")
-                            append(if (uiState.workshopAutoResolveVisibleItems) "自动检测已开" else "自动检测已关")
+                            append(if (uiState.workshopAutoResolveVisibleItems) "列表预读已开" else "列表预读已关")
                         },
                         onClick = { activeDestination = SettingsDestination.Workshop },
                     )
@@ -1360,8 +1360,8 @@ private fun WorkshopSettingsContent(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
     SettingsBooleanRow(
-        title = "自动检测下载方式",
-        description = "开启后会预读当前可见条目的可下载能力；关闭后只在点进详情时检测。",
+        title = "列表预读下载方式",
+        description = "开启后会预读当前可见条目的可下载能力；关闭后列表先只加载条目，点进详情或开始下载时再检测。",
         checked = uiState.workshopAutoResolveVisibleItems,
         onCheckedChange = onToggleAutoResolve,
     )

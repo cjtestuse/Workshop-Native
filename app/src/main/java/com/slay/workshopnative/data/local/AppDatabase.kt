@@ -8,7 +8,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [DownloadTaskEntity::class],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 @TypeConverters(Converters::class)
@@ -86,6 +86,17 @@ abstract class AppDatabase : RoomDatabase() {
                     """
                     ALTER TABLE download_tasks
                     ADD COLUMN runtimeLastFailure TEXT
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    ALTER TABLE download_tasks
+                    ADD COLUMN boundAccountKeyHash TEXT
                     """.trimIndent(),
                 )
             }

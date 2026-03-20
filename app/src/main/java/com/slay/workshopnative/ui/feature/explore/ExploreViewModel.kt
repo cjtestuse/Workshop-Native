@@ -3,6 +3,7 @@ package com.slay.workshopnative.ui.feature.explore
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.slay.workshopnative.core.logging.AppLog
+import com.slay.workshopnative.core.logging.SupportDiagnosticsStore
 import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.model.FavoriteWorkshopGame
 import com.slay.workshopnative.data.model.GameDetails
@@ -44,9 +45,12 @@ data class ExploreUiState(
 class ExploreViewModel @Inject constructor(
     private val steamRepository: SteamRepository,
     private val favoritesRepository: WorkshopFavoritesRepository,
+    private val supportDiagnosticsStore: SupportDiagnosticsStore,
 ) : ViewModel() {
     private companion object {
         const val LOG_TAG = "ExploreViewModel"
+        const val REMOTE_SEARCH_DEBOUNCE_MS = 650L
+        const val MIN_REMOTE_SEARCH_LENGTH = 2
     }
 
     private val _uiState = MutableStateFlow(ExploreUiState())
@@ -89,9 +93,20 @@ class ExploreViewModel @Inject constructor(
             return
         }
 
+        if (normalized.length < MIN_REMOTE_SEARCH_LENGTH) {
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    searchResults = emptyList(),
+                    errorMessage = null,
+                )
+            }
+            return
+        }
+
         searchJob = viewModelScope.launch {
-            delay(280)
-            runSearch(normalized)
+            delay(REMOTE_SEARCH_DEBOUNCE_MS)
+            runSearch(normalized, triggerSource = "input")
         }
     }
 
@@ -100,8 +115,12 @@ class ExploreViewModel @Inject constructor(
         if (state.isLoading) return
         val normalized = state.query.trim()
         if (normalized.isNotBlank()) {
+            if (normalized.length < MIN_REMOTE_SEARCH_LENGTH) {
+                _uiState.update { it.copy(isLoading = false, searchResults = emptyList(), errorMessage = null) }
+                return
+            }
             searchJob?.cancel()
-            viewModelScope.launch { runSearch(normalized) }
+            viewModelScope.launch { runSearch(normalized, triggerSource = "refresh") }
         } else {
             loadExplorePage(state.browsePage)
         }
@@ -181,10 +200,19 @@ class ExploreViewModel @Inject constructor(
         }
     }
 
-    private suspend fun runSearch(normalized: String) {
+    private suspend fun runSearch(
+        normalized: String,
+        triggerSource: String,
+    ) {
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
         steamRepository.searchWorkshopGames(normalized)
             .onSuccess { games ->
+                supportDiagnosticsStore.recordSearchSample(
+                    triggerSource = triggerSource,
+                    queryLength = normalized.length,
+                    resultCount = games.size,
+                    succeeded = true,
+                )
                 if (_uiState.value.query.trim() == normalized) {
                     _uiState.update {
                         it.copy(
@@ -196,7 +224,13 @@ class ExploreViewModel @Inject constructor(
                 }
             }
             .onFailure { error ->
-                AppLog.w(LOG_TAG, "runSearch failed query=$normalized", error)
+                AppLog.w(LOG_TAG, "runSearch failed queryLength=${normalized.length}", error)
+                supportDiagnosticsStore.recordSearchSample(
+                    triggerSource = triggerSource,
+                    queryLength = normalized.length,
+                    resultCount = null,
+                    succeeded = false,
+                )
                 if (_uiState.value.query.trim() == normalized) {
                     _uiState.update {
                         it.copy(

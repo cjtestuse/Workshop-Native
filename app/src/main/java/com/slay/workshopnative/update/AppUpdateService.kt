@@ -41,6 +41,7 @@ class AppUpdateService @Inject constructor(
     suspend fun checkForUpdates(
         currentVersion: String,
         preferredSource: AppUpdateSource,
+        validateReachability: Boolean = true,
     ): AppUpdateCheckResult = withContext(Dispatchers.IO) {
         AppLog.i(
             LOG_TAG,
@@ -96,6 +97,7 @@ class AppUpdateService @Inject constructor(
             release = release,
             preferredSource = preferredSource,
             metadataSource = metadataSource,
+            validateReachability = validateReachability,
         ) ?: return@withContext AppUpdateCheckResult.Failure(
             errorSummary = if (release.assets.isEmpty()) {
                 "找到了新版本，但该 Release 还没有上传 APK 资产。"
@@ -203,11 +205,12 @@ class AppUpdateService @Inject constructor(
         release: AppUpdateReleaseInfo,
         preferredSource: AppUpdateSource,
         metadataSource: AppUpdateSource,
+        validateReachability: Boolean = true,
     ): AppUpdateDownloadResolution? {
         val asset = selectPreferredAsset(release.assets) ?: return null
         for (source in AppUpdateSource.downloadCandidates(preferredSource, metadataSource)) {
             val candidateUrl = source.buildUrl(asset.downloadUrl)
-            if (isDownloadCandidateReachable(candidateUrl)) {
+            if (!validateReachability || isDownloadCandidateReachable(candidateUrl)) {
                 return AppUpdateDownloadResolution(
                     source = source,
                     resolvedUrl = candidateUrl,

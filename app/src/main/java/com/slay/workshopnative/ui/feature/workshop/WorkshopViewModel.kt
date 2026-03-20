@@ -74,7 +74,7 @@ class WorkshopViewModel @Inject constructor(
     private val resolvedItemsCache = mutableMapOf<Long, WorkshopItem>()
     private val metadataRequestsInFlight = mutableSetOf<Long>()
     private var workshopPageSize = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE
-    private var autoResolveDownloadInfo = true
+    private var autoResolveDownloadInfo = false
     private var isLoginFeatureEnabled = false
     private var isLoggedInDownloadEnabled = false
     private var isSubscriptionDisplayEnabled = false
@@ -696,8 +696,8 @@ class WorkshopViewModel @Inject constructor(
             !isLoginFeatureEnabled -> "匿名下载"
             !isLoggedInDownloadEnabled -> "匿名下载"
             currentSessionStatus != SessionStatus.Authenticated -> "匿名下载"
-            preferAnonymousDownloads -> currentAccountName.ifBlank { "已登录账号" }.let { "匿名优先·$it" }
-            else -> currentAccountName.ifBlank { "已登录账号" }.let { "账号下载·$it" }
+            preferAnonymousDownloads -> "匿名优先"
+            else -> "账号下载"
         }
     }
 
@@ -714,7 +714,7 @@ class WorkshopViewModel @Inject constructor(
             preferAnonymousDownloads ->
                 "会优先尝试匿名方式；若匿名不可用，不会自动切换到当前 Steam 账号。"
             else ->
-                "当前会直接使用 ${currentAccountName.ifBlank { "已登录账号" }} 进行下载。"
+                "当前会直接使用已登录账号进行下载。"
         }
     }
 

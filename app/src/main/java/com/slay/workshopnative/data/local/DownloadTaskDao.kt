@@ -37,6 +37,7 @@ interface DownloadTaskDao {
             END,
             targetTreeUri = NULL,
             storageRootRef = NULL,
+            boundAccountKeyHash = NULL,
             boundAccountName = NULL,
             boundSteamId64 = NULL,
             runtimeRouteLabel = NULL,
@@ -192,6 +193,7 @@ interface DownloadTaskDao {
                 ELSE sourceUrl
             END,
             targetTreeUri = NULL,
+            boundAccountKeyHash = NULL,
             boundAccountName = NULL,
             boundSteamId64 = NULL,
             storageRootRef = NULL,

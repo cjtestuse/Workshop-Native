@@ -9,6 +9,8 @@ import androidx.room.Room
 import androidx.work.WorkManager
 import com.slay.workshopnative.BuildConfig
 import com.slay.workshopnative.core.logging.AppLog
+import com.slay.workshopnative.core.logging.SupportDiagnosticsStore
+import com.slay.workshopnative.core.util.sanitizeOkHttpLogMessage
 import com.slay.workshopnative.data.local.AppDatabase
 import com.slay.workshopnative.data.local.DownloadTaskDao
 import dagger.Module
@@ -37,9 +39,10 @@ object AppModule {
     @Singleton
     fun provideOkHttpClient(
         @ApplicationContext context: Context,
+        supportDiagnosticsStore: SupportDiagnosticsStore,
     ): OkHttpClient {
         val logging = HttpLoggingInterceptor { message ->
-            AppLog.i("OkHttp", message)
+            AppLog.i("OkHttp", sanitizeOkHttpLogMessage(message))
         }.apply {
             level = if (BuildConfig.DEBUG) {
                 HttpLoggingInterceptor.Level.BASIC
@@ -49,6 +52,16 @@ object AppModule {
         }
         return OkHttpClient.Builder()
             .cache(Cache(context.cacheDir.resolve("http-cache"), 64L * 1024L * 1024L))
+            .addInterceptor { chain ->
+                val request = chain.request()
+                supportDiagnosticsStore.recordHttpRequest(request)
+                try {
+                    chain.proceed(request)
+                } catch (throwable: Throwable) {
+                    supportDiagnosticsStore.recordHttpFailure(request)
+                    throw throwable
+                }
+            }
             .addInterceptor(logging)
             .retryOnConnectionFailure(true)
             .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
@@ -78,7 +91,12 @@ object AppModule {
             AppDatabase::class.java,
             "workshop_native.db",
         )
-            .addMigrations(AppDatabase.MIGRATION_5_6, AppDatabase.MIGRATION_6_7, AppDatabase.MIGRATION_7_8)
+            .addMigrations(
+                AppDatabase.MIGRATION_5_6,
+                AppDatabase.MIGRATION_6_7,
+                AppDatabase.MIGRATION_7_8,
+                AppDatabase.MIGRATION_8_9,
+            )
             .fallbackToDestructiveMigration(dropAllTables = true)
             .build()
     }

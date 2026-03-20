@@ -111,7 +111,7 @@ data class UserPreferences(
     val preferAnonymousDownloads: Boolean = true,
     val allowAuthenticatedDownloadFallback: Boolean = true,
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
-    val workshopAutoResolveVisibleItems: Boolean = true,
+    val workshopAutoResolveVisibleItems: Boolean = false,
     val favoriteWorkshopGames: List<FavoriteWorkshopGame> = emptyList(),
 )
 
@@ -240,7 +240,7 @@ class UserPreferencesStore @Inject constructor(
                 workshopPageSize = WorkshopBrowseQuery.normalizePageSize(
                     prefs[WORKSHOP_PAGE_SIZE] ?: WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
                 ),
-                workshopAutoResolveVisibleItems = prefs[WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS] ?: true,
+                workshopAutoResolveVisibleItems = prefs[WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS] ?: false,
                 favoriteWorkshopGames = decodeFavoriteWorkshopGames(prefs[FAVORITE_WORKSHOP_GAMES_JSON]),
             )
         }
@@ -323,6 +323,7 @@ class UserPreferencesStore @Inject constructor(
             prefs.remove(OWNED_GAMES_SNAPSHOT_SAVED_AT_MS)
             prefs.remove(OWNED_GAMES_SNAPSHOT_JSON)
         }
+        secureSessionStore.clearOwnedGamesSnapshotPayload()
         secureSessionStore.clearActiveSessionProfile()
         secureSessionStore.clearActiveRefreshToken()
     }
@@ -355,6 +356,7 @@ class UserPreferencesStore @Inject constructor(
             prefs.remove(OWNED_GAMES_SNAPSHOT_SAVED_AT_MS)
             prefs.remove(OWNED_GAMES_SNAPSHOT_JSON)
         }
+        secureSessionStore.clearOwnedGamesSnapshotPayload()
         secureSessionStore.clearActiveSessionProfile()
         secureSessionStore.clearActiveRefreshToken()
         secureSessionStore.clearSavedAccountsMetadata()
@@ -453,6 +455,9 @@ class UserPreferencesStore @Inject constructor(
                 prefs.remove(OWNED_GAMES_SNAPSHOT_SAVED_AT_MS)
                 prefs.remove(OWNED_GAMES_SNAPSHOT_JSON)
             }
+        }
+        if (removedActiveAccount) {
+            secureSessionStore.clearOwnedGamesSnapshotPayload()
         }
     }
 
@@ -621,14 +626,18 @@ class UserPreferencesStore @Inject constructor(
         payloadJson: String,
         savedAtMs: Long = System.currentTimeMillis(),
     ) {
+        migrateLegacySecretsIfNeeded()
+        secureSessionStore.writeOwnedGamesSnapshotPayload(payloadJson)
         dataStore.edit { prefs ->
             prefs[OWNED_GAMES_SNAPSHOT_STEAM_ID64] = steamId64
             prefs[OWNED_GAMES_SNAPSHOT_SAVED_AT_MS] = savedAtMs
-            prefs[OWNED_GAMES_SNAPSHOT_JSON] = payloadJson
+            prefs.remove(OWNED_GAMES_SNAPSHOT_JSON)
         }
     }
 
     suspend fun clearOwnedGamesSnapshot() {
+        migrateLegacySecretsIfNeeded()
+        secureSessionStore.clearOwnedGamesSnapshotPayload()
         dataStore.edit { prefs ->
             prefs.remove(OWNED_GAMES_SNAPSHOT_STEAM_ID64)
             prefs.remove(OWNED_GAMES_SNAPSHOT_SAVED_AT_MS)
@@ -643,11 +652,12 @@ class UserPreferencesStore @Inject constructor(
     }
 
     suspend fun loadOwnedGamesSnapshot(): OwnedGamesSnapshot {
+        migrateLegacySecretsIfNeeded()
         val prefs = dataStore.data.first()
         return OwnedGamesSnapshot(
             steamId64 = prefs[OWNED_GAMES_SNAPSHOT_STEAM_ID64] ?: 0,
             savedAtMs = prefs[OWNED_GAMES_SNAPSHOT_SAVED_AT_MS] ?: 0,
-            payloadJson = prefs[OWNED_GAMES_SNAPSHOT_JSON].orEmpty(),
+            payloadJson = secureSessionStore.readOwnedGamesSnapshotPayload(),
         )
     }
 
@@ -932,6 +942,10 @@ class UserPreferencesStore @Inject constructor(
                     secureSessionStore.writeActiveRefreshToken(legacyRefreshToken)
                 }
 
+                prefs[OWNED_GAMES_SNAPSHOT_JSON]
+                    ?.takeIf { it.isNotBlank() && secureSessionStore.readOwnedGamesSnapshotPayload().isBlank() }
+                    ?.let(secureSessionStore::writeOwnedGamesSnapshotPayload)
+
                 if (mergedAccounts.isNotEmpty()) {
                     val sanitizedAccounts = sanitizeSavedAccounts(mergedAccounts)
                     sanitizedAccounts.forEach { account ->
@@ -953,6 +967,7 @@ class UserPreferencesStore @Inject constructor(
                 prefs.remove(CLIENT_ID)
                 prefs.remove(STEAM_ID64)
                 prefs.remove(SAVED_ACCOUNTS_JSON)
+                prefs.remove(OWNED_GAMES_SNAPSHOT_JSON)
             }
             legacySecretsMigrated = true
         }

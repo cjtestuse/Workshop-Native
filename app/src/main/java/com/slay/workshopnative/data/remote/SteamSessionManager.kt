@@ -10,6 +10,9 @@ import androidx.annotation.WorkerThread
 import androidx.core.text.HtmlCompat
 import androidx.documentfile.provider.DocumentFile
 import com.slay.workshopnative.core.logging.AppLog as Log
+import com.slay.workshopnative.core.logging.SupportDiagnosticsStore
+import com.slay.workshopnative.core.logging.SupportDownloadDecisionSnapshot
+import com.slay.workshopnative.core.logging.SupportPerformanceSnapshot
 import com.slay.workshopnative.core.storage.createMediaStoreFileOutput
 import com.slay.workshopnative.core.storage.createMediaStoreFileUri
 import com.slay.workshopnative.core.storage.copyLocalFileToUri
@@ -20,6 +23,7 @@ import com.slay.workshopnative.core.storage.openExistingMediaStoreFileOutput
 import com.slay.workshopnative.core.storage.queryUriSize
 import com.slay.workshopnative.core.storage.uniqueMediaStoreRootName
 import com.slay.workshopnative.core.storage.workshopDownloadStagingRoot
+import com.slay.workshopnative.core.util.buildAccountBindingHash
 import com.slay.workshopnative.core.util.DownloadPausedException
 import com.slay.workshopnative.core.util.sanitizeFileName
 import com.slay.workshopnative.core.util.toUserMessage
@@ -157,6 +161,7 @@ class SteamSessionManager @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val json: Json,
     private val preferencesStore: UserPreferencesStore,
+    private val supportDiagnosticsStore: SupportDiagnosticsStore,
 ) {
     companion object {
         private const val LOG_TAG = "SteamSessionManager"
@@ -171,12 +176,15 @@ class SteamSessionManager @Inject constructor(
         private const val WORKSHOP_GAME_DISCOVERY_CACHE_MS = 45_000L
         private const val CDN_SERVER_LIST_CACHE_MS = 10 * 60 * 1000L
         private const val ANONYMOUS_CONTENT_SESSION_IDLE_MS = 60 * 60 * 1000L
+        private const val ANONYMOUS_PREWARM_COOLDOWN_MS = 10 * 60 * 1000L
         private const val INTERACTIVE_LOGIN_RECOVERY_ATTEMPTS = 3
         private const val CDN_SERVER_CANDIDATE_LIMIT = 40
         private const val MAX_CDN_ROUTES_PER_TRANSPORT = 4
         private const val MAX_ACTIVE_CDN_ROUTES = 4
         private const val CDN_MANIFEST_RACE_ROUTE_COUNT = 2
         private const val MAX_CDN_ROUTE_ATTEMPTS_PER_CHUNK = 3
+        private const val CDN_READ_TIMEOUT_SECONDS = 10L
+        private const val CDN_CALL_TIMEOUT_SECONDS = 12L
         private const val MAX_DOWNLOAD_CHUNK_PIPELINE_DEPTH = 8
         private const val WORKSHOP_FILE_WRITE_BUFFER_SIZE = 1024 * 1024
         private const val EXPORT_PROGRESS_UPDATE_INTERVAL_MS = 1000L
@@ -284,6 +292,7 @@ class SteamSessionManager @Inject constructor(
         val servers: List<Server>,
         val manifestRequestCode: Long,
         val accessLabel: String,
+        val allowInsecureTransport: Boolean,
         val cdnAuthTokenProvider: (suspend (String) -> String?)? = null,
     )
 
@@ -320,6 +329,13 @@ class SteamSessionManager @Inject constructor(
             if (sampleBytesCount > 0L && durationNanos > 0L) {
                 sampledBytes.addAndGet(sampleBytesCount)
                 sampledNanos.addAndGet(durationNanos)
+            }
+            while (true) {
+                val current = failureCount.get()
+                if (current <= 0L) break
+                if (failureCount.compareAndSet(current, current - 1L)) {
+                    break
+                }
             }
         }
 
@@ -365,6 +381,7 @@ class SteamSessionManager @Inject constructor(
         val performance: CdnHostPerformance,
         private val tokenProvider: suspend () -> String?,
     ) {
+        val selectionKey: String = "${hostName.lowercase()}|${if (forceDirect) "direct" else "system"}"
         private val tokenMutex = Mutex()
         @Volatile
         private var tokenResolved = false
@@ -397,6 +414,9 @@ class SteamSessionManager @Inject constructor(
         val maxActiveRoutes: Int,
         val dispatcherRequestFloor: Int,
         val dispatcherPerHostFloor: Int,
+        val heapBudgetMb: Int,
+        val availableHeapMb: Int,
+        val isLowRamDevice: Boolean,
     )
 
     private class AnonymousContentSession(
@@ -463,6 +483,8 @@ class SteamSessionManager @Inject constructor(
     private var authenticatedCdnServersCache: CachedValue<List<Server>>? = null
     private var anonymousCdnServersCache: CachedValue<List<Server>>? = null
     private var anonymousContentSession: AnonymousContentSession? = null
+    private var anonymousPrewarmInFlight = false
+    private var lastAnonymousPrewarmAtMs = 0L
 
     private val _sessionState = MutableStateFlow(SteamSessionState())
     val sessionState: StateFlow<SteamSessionState> = _sessionState.asStateFlow()
@@ -506,6 +528,15 @@ class SteamSessionManager @Inject constructor(
     suspend fun bootstrap() = withContext(Dispatchers.IO) {
         bootstrapJob?.join()
         val prefs = preferencesStore.snapshot()
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = "bootstrap_start",
+            fields = mapOf(
+                "rememberSession" to prefs.rememberSession.toString(),
+                "hasSavedSession" to (prefs.accountName.isNotBlank() && prefs.refreshToken.isNotBlank()).toString(),
+                "loginFeatureEnabled" to prefs.isLoginFeatureEnabled.toString(),
+                "defaultGuestMode" to prefs.defaultGuestMode.toString(),
+            ),
+        )
         Log.i(
             LOG_TAG,
             "bootstrap remember=${prefs.rememberSession} hasSavedSession=${prefs.accountName.isNotBlank() && prefs.refreshToken.isNotBlank()}",
@@ -557,6 +588,10 @@ class SteamSessionManager @Inject constructor(
                     restore = true,
                 )
             }.onFailure { throwable ->
+                supportDiagnosticsStore.recordRecoveryEvent(
+                    action = "bootstrap_restore_failed",
+                    fields = mapOf("message" to readableMessage(throwable)),
+                )
                 Log.w(LOG_TAG, "bootstrap restore failed", throwable)
                 _sessionState.value = SteamSessionState(
                     status = SessionStatus.Idle,
@@ -579,6 +614,13 @@ class SteamSessionManager @Inject constructor(
         appScope.launch {
             val previousAccount = _sessionState.value.account
             val prefs = preferencesStore.snapshot()
+            supportDiagnosticsStore.recordRecoveryEvent(
+                action = "retry_restore_requested",
+                fields = mapOf(
+                    "hasSavedSession" to (prefs.accountName.isNotBlank() && prefs.refreshToken.isNotBlank()).toString(),
+                    "loginFeatureEnabled" to prefs.isLoginFeatureEnabled.toString(),
+                ),
+            )
             preferredConnectionProfileLabel = prefs.lastConnectionProfileLabel
             lastSuccessfulCdnHost = prefs.lastCdnHost
             lastSuccessfulCdnTransportDirect = prefs.lastCdnTransportDirect
@@ -632,15 +674,35 @@ class SteamSessionManager @Inject constructor(
 
     fun prewarmAnonymousDownloadAccess() {
         appScope.launch {
+            val shouldRun = anonymousContentSessionMutex.withLock {
+                val now = System.currentTimeMillis()
+                if (
+                    anonymousPrewarmInFlight ||
+                    now - lastAnonymousPrewarmAtMs < ANONYMOUS_PREWARM_COOLDOWN_MS
+                ) {
+                    false
+                } else {
+                    anonymousPrewarmInFlight = true
+                    true
+                }
+            }
+            if (!shouldRun) return@launch
+            supportDiagnosticsStore.incrementCounter("anonymous_prewarm_invocations")
+            supportDiagnosticsStore.recordRecoveryEvent(action = "anonymous_prewarm_requested")
             runCatching {
                 prewarmAnonymousContentSession()
+                lastAnonymousPrewarmAtMs = System.currentTimeMillis()
             }.onFailure { throwable ->
                 Log.w(LOG_TAG, "prewarmAnonymousDownloadAccess failed", throwable)
+            }
+            anonymousContentSessionMutex.withLock {
+                anonymousPrewarmInFlight = false
             }
         }
     }
 
     suspend fun logout() = withContext(Dispatchers.IO) {
+        supportDiagnosticsStore.recordRecoveryEvent(action = "logout")
         Log.i(LOG_TAG, "logout")
         manualLogout = true
         pendingAccountName = ""
@@ -660,6 +722,10 @@ class SteamSessionManager @Inject constructor(
     }
 
     suspend fun switchSavedAccount(accountKey: String) = withContext(Dispatchers.IO) {
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = "switch_saved_account",
+            fields = mapOf("accountKeyPresent" to accountKey.isNotBlank().toString()),
+        )
         Log.i(LOG_TAG, "switchSavedAccount requested")
         check(preferencesStore.snapshot().isLoginFeatureEnabled) { "已在设置中关闭登录功能" }
         val savedAccount = preferencesStore.activateSavedAccount(accountKey)
@@ -719,6 +785,7 @@ class SteamSessionManager @Inject constructor(
     @WorkerThread
     suspend fun loadOwnedGames(forceRefresh: Boolean = false): List<OwnedGame> = withContext(Dispatchers.IO) {
         Log.d(LOG_TAG, "loadOwnedGames start")
+        supportDiagnosticsStore.incrementCounter("steam_rpc_owned_games_requests")
         val prefs = preferencesStore.snapshot()
         check(prefs.isLoginFeatureEnabled) { "已在设置中关闭登录功能" }
         check(prefs.isOwnedGamesDisplayEnabled) { "已在设置中关闭“用户已购买标识展示”" }
@@ -1007,6 +1074,7 @@ class SteamSessionManager @Inject constructor(
 
         val response = publishedFileService?.getUserFiles(request)?.await()
             ?: error("Steam workshop service unavailable")
+        supportDiagnosticsStore.incrementCounter("steam_rpc_subscriptions_requests")
         val details = response.body.publishedfiledetailsList
             .filter { it.result == EResult.OK.code() }
         val totalCount = if (response.body.hasTotal()) response.body.total else details.size
@@ -1140,8 +1208,7 @@ class SteamSessionManager @Inject constructor(
         rootName: String,
         existingRootRef: String? = null,
         downloadAuthMode: DownloadAuthMode = DownloadAuthMode.Authenticated,
-        boundAccountName: String? = null,
-        boundSteamId64: Long? = null,
+        boundAccountKeyHash: String? = null,
         onStorageRootResolved: suspend (String) -> Unit = {},
         shouldPause: suspend () -> Boolean = { false },
         onProgress: suspend (bytesDownloaded: Long, totalBytes: Long) -> Unit,
@@ -1165,16 +1232,23 @@ class SteamSessionManager @Inject constructor(
             ?: error("该条目没有可下载的 Steam 内容 manifest")
         val appId = item.appId.takeIf { it > 0 } ?: error("无效的 Workshop AppID")
         val prefs = preferencesStore.snapshot()
+        val currentSessionBindingHash = buildAccountBindingHash(
+            accountName = _sessionState.value.account?.accountName,
+            steamId64 = _sessionState.value.account?.steamId64,
+        )
+        val persistedBindingHash = buildAccountBindingHash(
+            accountName = prefs.accountName,
+            steamId64 = prefs.steamId64,
+        )
         val canUseAuthenticatedPath =
             prefs.isLoginFeatureEnabled &&
                 prefs.isLoggedInDownloadEnabled &&
-            _sessionState.value.status == SessionStatus.Authenticated &&
+                _sessionState.value.status == SessionStatus.Authenticated &&
                 (
-                    boundSteamId64 == null ||
-                        boundSteamId64 <= 0L ||
-                        _sessionState.value.account?.steamId64 == boundSteamId64 ||
-                        prefs.steamId64 == boundSteamId64
-                    )
+                    boundAccountKeyHash.isNullOrBlank() ||
+                        boundAccountKeyHash == currentSessionBindingHash ||
+                        boundAccountKeyHash == persistedBindingHash
+                )
         val allowAuthenticatedFallback = canUseAuthenticatedPath &&
             (
                 downloadAuthMode == DownloadAuthMode.Authenticated ||
@@ -1188,6 +1262,37 @@ class SteamSessionManager @Inject constructor(
             DownloadAuthMode.Authenticated -> !allowAuthenticatedFallback
             DownloadAuthMode.Auto -> true
         }
+        supportDiagnosticsStore.recordDownloadDecision(
+            SupportDownloadDecisionSnapshot(
+                taskId = stagingTaskId,
+                timestampMs = System.currentTimeMillis(),
+                publishedFileId = item.publishedFileId,
+                appId = appId,
+                downloadAuthMode = downloadAuthMode.name,
+                anonymousFirst = anonymousFirst,
+                canUseAuthenticatedPath = canUseAuthenticatedPath,
+                allowAuthenticatedFallback = allowAuthenticatedFallback,
+                sessionStatus = _sessionState.value.status.name,
+                isLoginFeatureEnabled = prefs.isLoginFeatureEnabled,
+                isLoggedInDownloadEnabled = prefs.isLoggedInDownloadEnabled,
+                preferAnonymousDownloads = prefs.preferAnonymousDownloads,
+                allowAuthenticatedDownloadFallbackSetting = prefs.allowAuthenticatedDownloadFallback,
+                boundAccountHashMatched = boundAccountKeyHash.isNullOrBlank() ||
+                    boundAccountKeyHash == currentSessionBindingHash ||
+                    boundAccountKeyHash == persistedBindingHash,
+            ),
+        )
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "download_item_start",
+            taskId = stagingTaskId,
+            fields = mapOf(
+                "publishedFileId" to item.publishedFileId.toString(),
+                "appId" to appId.toString(),
+                "authMode" to downloadAuthMode.name,
+                "anonymousFirst" to anonymousFirst.toString(),
+                "allowAuthenticatedFallback" to allowAuthenticatedFallback.toString(),
+            ),
+        )
 
         val storageRoot = createWorkshopStorageRoot(
             stagingTaskId = stagingTaskId,
@@ -1203,18 +1308,38 @@ class SteamSessionManager @Inject constructor(
         if (performanceProfile.chunkConcurrency < performanceProfile.requestedChunkConcurrency) {
             Log.w(
                 LOG_TAG,
-                "downloadWorkshopItem clamp chunk concurrency requested=${performanceProfile.requestedChunkConcurrency} effective=${performanceProfile.chunkConcurrency}",
+                "downloadWorkshopItem clamp chunk concurrency requested=${performanceProfile.requestedChunkConcurrency} effective=${performanceProfile.chunkConcurrency} mode=${performanceProfile.mode} heapBudgetMb=${performanceProfile.heapBudgetMb} availableHeapMb=${performanceProfile.availableHeapMb} lowRam=${performanceProfile.isLowRamDevice}",
             )
         }
+        supportDiagnosticsStore.recordPerformanceSnapshot(
+            SupportPerformanceSnapshot(
+                taskId = stagingTaskId,
+                timestampMs = System.currentTimeMillis(),
+                mode = performanceProfile.mode.name,
+                requestedChunkConcurrency = performanceProfile.requestedChunkConcurrency,
+                effectiveChunkConcurrency = performanceProfile.chunkConcurrency,
+                maxRoutesPerTransport = performanceProfile.maxRoutesPerTransport,
+                maxActiveRoutes = performanceProfile.maxActiveRoutes,
+                dispatcherMaxRequests = when (performanceProfile.mode) {
+                    DownloadPerformanceMode.Auto ->
+                        (performanceProfile.chunkConcurrency * 2).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
+                    DownloadPerformanceMode.Compatibility ->
+                        (performanceProfile.chunkConcurrency + 1).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
+                },
+                dispatcherMaxRequestsPerHost = when (performanceProfile.mode) {
+                    DownloadPerformanceMode.Auto ->
+                        (performanceProfile.chunkConcurrency + 2).coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
+                    DownloadPerformanceMode.Compatibility ->
+                        performanceProfile.chunkConcurrency.coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
+                },
+                heapBudgetMb = performanceProfile.heapBudgetMb,
+                availableHeapMb = performanceProfile.availableHeapMb,
+                isLowRamDevice = performanceProfile.isLowRamDevice,
+            ),
+        )
         val transportModes = prioritizedTransportModes(prefs.cdnTransportPreference)
         onStorageRootResolved(storageRoot.resumeRef)
         val failures = mutableListOf<String>()
-
-        if (downloadAuthMode == DownloadAuthMode.Auto && allowAuthenticatedFallback && !hasWarmAnonymousContentSession()) {
-            appScope.launch {
-                runCatching { prewarmAnonymousContentSession() }
-            }
-        }
 
         if (anonymousFirst) {
             runCatching {
@@ -1224,6 +1349,7 @@ class SteamSessionManager @Inject constructor(
                     depotId = item.appId.takeIf { it > 0 } ?: appId,
                 )
                 downloadWorkshopItemViaContentAccess(
+                    taskId = stagingTaskId,
                     item = item,
                     depotId = item.appId.takeIf { it > 0 } ?: appId,
                     manifestId = manifestId,
@@ -1255,10 +1381,10 @@ class SteamSessionManager @Inject constructor(
                     appId = appId,
                     depotId = authenticatedDepotId,
                     manifestId = manifestId,
-                    boundAccountName = boundAccountName,
-                    boundSteamId64 = boundSteamId64,
+                    boundAccountKeyHash = boundAccountKeyHash,
                 )
                 downloadWorkshopItemViaContentAccess(
+                    taskId = stagingTaskId,
                     item = item,
                     depotId = authenticatedDepotId,
                     manifestId = manifestId,
@@ -1291,6 +1417,7 @@ class SteamSessionManager @Inject constructor(
                     depotId = item.appId.takeIf { it > 0 } ?: appId,
                 )
                 downloadWorkshopItemViaContentAccess(
+                    taskId = stagingTaskId,
                     item = item,
                     depotId = item.appId.takeIf { it > 0 } ?: appId,
                     manifestId = manifestId,
@@ -1623,6 +1750,7 @@ class SteamSessionManager @Inject constructor(
     }
 
     private suspend fun downloadManifestFiles(
+        taskId: String?,
         manifest: DepotManifest,
         depotId: Int,
         routes: List<CdnRoute>,
@@ -1701,6 +1829,7 @@ class SteamSessionManager @Inject constructor(
                                     pendingChunks[chunkIndex] = async {
                                         coroutineContext.ensureActive()
                                         downloadChunkViaRoutes(
+                                            taskId = taskId,
                                             depotId,
                                             chunk,
                                             depotKey,
@@ -1746,6 +1875,16 @@ class SteamSessionManager @Inject constructor(
         }
     }
 
+    private fun uniqueServersByHost(
+        servers: List<Server>,
+    ): List<Server> {
+        val seenHosts = LinkedHashSet<String>()
+        return servers.filter { server ->
+            val hostName = serverIdentity(server) ?: return@filter false
+            seenHosts.add(hostName)
+        }
+    }
+
     private fun createTransportClients(
         transportModes: List<Boolean>,
         performanceProfile: DownloadPerformanceProfile,
@@ -1774,7 +1913,9 @@ class SteamSessionManager @Inject constructor(
         var rank = 0
         return buildList {
             transportClients.forEach { transportClient ->
-                servers.take(maxRoutesPerTransport.coerceAtLeast(1)).forEach { server ->
+                uniqueServersByHost(servers)
+                    .take(maxRoutesPerTransport.coerceAtLeast(1))
+                    .forEach { server ->
                     val hostName = serverIdentity(server) ?: return@forEach
                     add(
                         CdnRoute(
@@ -1802,33 +1943,53 @@ class SteamSessionManager @Inject constructor(
     private fun selectPreferredCdnRoutes(
         routes: List<CdnRoute>,
         excludedHosts: Set<String> = emptySet(),
+        excludedRouteKeys: Set<String> = emptySet(),
     ): List<CdnRoute> {
+        val now = System.currentTimeMillis()
         return routes.asSequence()
-            .filter { it.hostName !in excludedHosts }
+            .filter { route ->
+                route.hostName !in excludedHosts && route.selectionKey !in excludedRouteKeys
+            }
             .sortedWith(
                 compareBy<CdnRoute>(
-                    { if (it.hostName == lastSuccessfulCdnHost) 0 else 1 },
+                    { cdnCooldownPriority(it.hostName, now) },
+                    { if (it.performance.hasSamples()) 0 else 1 },
+                    { it.performance.averageNanosPerMiB() },
+                    { it.performance.failurePenalty() },
+                    { cdnLastSuccessPriority(it.hostName) },
                     {
                         lastSuccessfulCdnTransportDirect?.let { preferred ->
                             if (it.forceDirect == preferred) 0 else 1
                         } ?: 0
                     },
-                    { if (it.performance.hasSamples()) 0 else 1 },
-                    { it.performance.averageNanosPerMiB() },
-                    { it.performance.failurePenalty() },
                     { it.performance.activeRequestCount() },
                     { it.rank },
                 ),
             )
+            .distinctBy(CdnRoute::selectionKey)
             .toList()
+    }
+
+    private fun uniqueRoutesByHost(
+        routes: List<CdnRoute>,
+    ): List<CdnRoute> {
+        val seenHosts = LinkedHashSet<String>()
+        return routes.filter { route -> seenHosts.add(route.hostName) }
     }
 
     private fun selectActiveCdnRoutes(
         routes: List<CdnRoute>,
         excludedHosts: Set<String> = emptySet(),
+        excludedRouteKeys: Set<String> = emptySet(),
         maxActiveRoutes: Int = MAX_ACTIVE_CDN_ROUTES,
     ): List<CdnRoute> {
-        val preferredRoutes = selectPreferredCdnRoutes(routes, excludedHosts)
+        val preferredRoutes = uniqueRoutesByHost(
+            selectPreferredCdnRoutes(
+                routes = routes,
+                excludedHosts = excludedHosts,
+                excludedRouteKeys = excludedRouteKeys,
+            ),
+        )
         val effectiveLimit = maxActiveRoutes.coerceAtLeast(1)
         if (preferredRoutes.size <= effectiveLimit) {
             return preferredRoutes
@@ -1858,12 +2019,13 @@ class SteamSessionManager @Inject constructor(
     }
 
     private suspend fun loadManifestFromRoutes(
+        taskId: String?,
         routes: List<CdnRoute>,
         depotId: Int,
         manifestId: Long,
         contentAccess: WorkshopContentAccess,
     ): Pair<DepotManifest, CdnRoute> = coroutineScope {
-        val preferredRoutes = selectPreferredCdnRoutes(routes)
+        val preferredRoutes = uniqueRoutesByHost(selectPreferredCdnRoutes(routes))
         check(preferredRoutes.isNotEmpty()) { "未找到可用的 Steam CDN 路由" }
 
         val failures = mutableListOf<String>()
@@ -1875,6 +2037,7 @@ class SteamSessionManager @Inject constructor(
                     route.performance.beginRequest()
                     val startedAt = System.nanoTime()
                     runCatching {
+                        supportDiagnosticsStore.incrementCounter("download_manifest_requests", route.hostName)
                         val manifest = route.client.downloadManifestFuture(
                             depotId,
                             manifestId,
@@ -1886,6 +2049,7 @@ class SteamSessionManager @Inject constructor(
                         ).await()
                         prepareManifest(manifest, contentAccess.depotKey)
                         route.performance.finishSuccess(256L * 1024L, System.nanoTime() - startedAt)
+                        supportDiagnosticsStore.recordManifestRouteSuccess(taskId, route.hostName)
                         results.trySend(
                             ManifestProbeResult(
                                 route = route,
@@ -1902,6 +2066,11 @@ class SteamSessionManager @Inject constructor(
                             else -> {
                                 route.performance.finishFailure()
                                 recordCdnFailure(route.hostName)
+                                supportDiagnosticsStore.recordCdnFailure(
+                                    taskId = taskId,
+                                    host = route.hostName,
+                                    message = throwable.message ?: throwable.javaClass.simpleName,
+                                )
                             }
                         }
                         results.trySend(
@@ -1946,6 +2115,7 @@ class SteamSessionManager @Inject constructor(
     }
 
     private suspend fun downloadChunkViaRoutes(
+        taskId: String?,
         depotId: Int,
         chunk: `in`.dragonbra.javasteam.types.ChunkData,
         depotKey: ByteArray,
@@ -1953,10 +2123,15 @@ class SteamSessionManager @Inject constructor(
         maxActiveRoutes: Int,
         shouldPause: suspend () -> Boolean,
     ): DownloadedChunk {
-        val attemptedHosts = linkedSetOf<String>()
+        val attemptedRouteKeys = linkedSetOf<String>()
         var lastError: Throwable? = null
-        val candidateRoutes = selectActiveCdnRoutes(routes, maxActiveRoutes = maxActiveRoutes)
-        val maxAttempts = candidateRoutes.size.coerceAtMost(MAX_CDN_ROUTE_ATTEMPTS_PER_CHUNK).coerceAtLeast(1)
+        val maxAttempts = routes
+            .asSequence()
+            .map(CdnRoute::selectionKey)
+            .distinct()
+            .count()
+            .coerceAtMost(MAX_CDN_ROUTE_ATTEMPTS_PER_CHUNK)
+            .coerceAtLeast(1)
 
         repeat(maxAttempts) {
             coroutineContext.ensureActive()
@@ -1965,15 +2140,16 @@ class SteamSessionManager @Inject constructor(
             }
 
             val route = selectActiveCdnRoutes(
-                candidateRoutes,
-                attemptedHosts,
+                routes,
+                excludedRouteKeys = attemptedRouteKeys,
                 maxActiveRoutes = maxActiveRoutes,
             ).firstOrNull() ?: return@repeat
-            attemptedHosts += route.hostName
+            attemptedRouteKeys += route.selectionKey
             route.performance.beginRequest()
             val startedAt = System.nanoTime()
 
             try {
+                supportDiagnosticsStore.incrementCounter("download_chunk_attempts", route.hostName)
                 val encryptedBuffer = ByteArray(chunk.compressedLength)
                 val fileBuffer = ByteArray(chunk.uncompressedLength)
                 route.client.downloadDepotChunkFuture(
@@ -1995,6 +2171,7 @@ class SteamSessionManager @Inject constructor(
                     written.toLong().coerceAtLeast(1L),
                     System.nanoTime() - startedAt,
                 )
+                supportDiagnosticsStore.recordChunkRouteSuccess(taskId, route.hostName)
                 return DownloadedChunk(
                     buffer = if (written == fileBuffer.size) {
                         fileBuffer
@@ -2018,6 +2195,11 @@ class SteamSessionManager @Inject constructor(
                     else -> {
                         route.performance.finishFailure()
                         recordCdnFailure(route.hostName)
+                        supportDiagnosticsStore.recordCdnFailure(
+                            taskId = taskId,
+                            host = route.hostName,
+                            message = throwable.message ?: throwable.javaClass.simpleName,
+                        )
                         lastError = throwable
                     }
                 }
@@ -2028,6 +2210,7 @@ class SteamSessionManager @Inject constructor(
     }
 
     private suspend fun downloadWorkshopItemViaContentAccess(
+        taskId: String,
         item: WorkshopItem,
         depotId: Int,
         manifestId: Long,
@@ -2051,7 +2234,16 @@ class SteamSessionManager @Inject constructor(
         val candidateServers = prioritizeServersByUserPreference(
             servers = contentAccess.servers,
             preference = cdnPoolPreference,
-        )
+        ).filter { server ->
+            contentAccess.allowInsecureTransport || server.protocol.name.equals("HTTPS", ignoreCase = true)
+        }
+        check(candidateServers.isNotEmpty()) {
+            if (contentAccess.allowInsecureTransport) {
+                "${contentAccess.accessLabel} 没有可用的 Steam CDN 路由"
+            } else {
+                "${contentAccess.accessLabel} 没有可用的 HTTPS Steam CDN 路由"
+            }
+        }
         val transportClients = createTransportClients(
             transportModes = transportModes,
             performanceProfile = performanceProfile,
@@ -2063,7 +2255,22 @@ class SteamSessionManager @Inject constructor(
                 contentAccess = contentAccess,
                 maxRoutesPerTransport = performanceProfile.maxRoutesPerTransport,
             )
-            check(routes.isNotEmpty()) { "${contentAccess.accessLabel} 没有可用的 Steam CDN 路由" }
+            supportDiagnosticsStore.recordCdnTaskPlan(
+                taskId = taskId,
+                accessLabel = contentAccess.accessLabel,
+                poolPreference = cdnPoolPreference.name,
+                transportSummary = transportSummaryLabel(routes),
+                candidateServerCount = candidateServers.size,
+                httpsServerCount = candidateServers.count { it.protocol.name.equals("HTTPS", ignoreCase = true) },
+                selectedRouteCount = routes.size,
+            )
+            check(routes.isNotEmpty()) {
+                if (contentAccess.allowInsecureTransport) {
+                    "${contentAccess.accessLabel} 没有可用的 Steam CDN 路由"
+                } else {
+                    "${contentAccess.accessLabel} 没有可用的 HTTPS Steam CDN 路由"
+                }
+            }
 
             val sourceAddress = "steam://publishedfile/${item.publishedFileId} · manifest $manifestId"
             onRuntimeInfoChanged(
@@ -2077,6 +2284,7 @@ class SteamSessionManager @Inject constructor(
             )
 
             val (manifest, manifestRoute) = loadManifestFromRoutes(
+                taskId = taskId,
                 routes = routes,
                 depotId = depotId,
                 manifestId = manifestId,
@@ -2090,6 +2298,7 @@ class SteamSessionManager @Inject constructor(
                 routes = routes,
                 depotKey = contentAccess.depotKey,
                 storageRoot = storageRoot,
+                taskId = taskId,
                 chunkPrefetchCount = performanceProfile.chunkConcurrency,
                 maxActiveRoutes = performanceProfile.maxActiveRoutes,
                 shouldPause = shouldPause,
@@ -2114,13 +2323,11 @@ class SteamSessionManager @Inject constructor(
         appId: Int,
         depotId: Int,
         manifestId: Long,
-        boundAccountName: String?,
-        boundSteamId64: Long?,
+        boundAccountKeyHash: String?,
     ): WorkshopContentAccess {
-        validateBoundAuthenticatedAccount(boundAccountName, boundSteamId64)
+        validateBoundAuthenticatedAccount(boundAccountKeyHash)
         ensureAuthenticated()
-        val effectiveSteamId64 = boundSteamId64
-            ?: _sessionState.value.account?.steamId64
+        val effectiveSteamId64 = _sessionState.value.account?.steamId64
             ?.takeIf { it > 0L }
         val cacheKey = WorkshopContentAccessCacheKey(
             authMode = DownloadAuthMode.Authenticated,
@@ -2154,6 +2361,7 @@ class SteamSessionManager @Inject constructor(
             servers = servers,
             manifestRequestCode = manifestRequestCode,
             accessLabel = "已登录 Steam 内容",
+            allowInsecureTransport = false,
             cdnAuthTokenProvider = { hostName ->
                 runCatching {
                     contentHandler.getCDNAuthToken(appId, depotId, hostName, appScope).await()
@@ -2253,13 +2461,6 @@ class SteamSessionManager @Inject constructor(
         }
     }
 
-    private suspend fun hasWarmAnonymousContentSession(): Boolean = anonymousContentSessionMutex.withLock {
-        val existing = anonymousContentSession ?: return@withLock false
-        val now = System.currentTimeMillis()
-        existing.connectionAlive.get() &&
-            now - existing.lastUsedAtMs.get() <= ANONYMOUS_CONTENT_SESSION_IDLE_MS
-    }
-
     private suspend fun loadWorkshopContentAccessFromAnonymousSession(
         session: AnonymousContentSession,
         appId: Int,
@@ -2287,6 +2488,7 @@ class SteamSessionManager @Inject constructor(
             servers = servers,
             manifestRequestCode = manifestRequestCode,
             accessLabel = "匿名 Steam 内容",
+            allowInsecureTransport = true,
         )
     }
 
@@ -2407,16 +2609,28 @@ class SteamSessionManager @Inject constructor(
     }
 
     private suspend fun validateBoundAuthenticatedAccount(
-        boundAccountName: String?,
-        boundSteamId64: Long?,
+        boundAccountKeyHash: String?,
     ) {
+        val requiredHash = boundAccountKeyHash?.takeIf { it.isNotBlank() } ?: return
         val currentSession = _sessionState.value.account
-        if (boundSteamId64 != null && boundSteamId64 > 0L) {
-            if (currentSession?.steamId64 == boundSteamId64) return
-            val prefs = preferencesStore.snapshot()
-            if (prefs.steamId64 == boundSteamId64) return
-            error("当前下载任务绑定的是其他 Steam 账号：${boundAccountName ?: boundSteamId64}")
+        if (
+            requiredHash == buildAccountBindingHash(
+                accountName = currentSession?.accountName,
+                steamId64 = currentSession?.steamId64,
+            )
+        ) {
+            return
         }
+        val prefs = preferencesStore.snapshot()
+        if (
+            requiredHash == buildAccountBindingHash(
+                accountName = prefs.accountName,
+                steamId64 = prefs.steamId64,
+            )
+        ) {
+            return
+        }
+        error("当前下载任务绑定的是其他 Steam 账号")
     }
 
     private suspend fun canUseAuthenticatedWorkshopFallback(): Boolean {
@@ -2667,9 +2881,9 @@ class SteamSessionManager @Inject constructor(
             .dispatcher(dispatcher)
             .connectionPool(connectionPool)
             .connectTimeout(6, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(CDN_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)
-            .callTimeout(25, TimeUnit.SECONDS)
+            .callTimeout(CDN_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .apply {
                 if (forceDirect) {
@@ -2692,8 +2906,13 @@ class SteamSessionManager @Inject constructor(
         val normalizedRequested = requested.coerceIn(1, MAX_DOWNLOAD_CHUNK_CONCURRENCY)
         val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
         val runtimeHeapMb = (Runtime.getRuntime().maxMemory() / (1024L * 1024L)).toInt().coerceAtLeast(1)
+        val allocatedHeapMb = (
+            (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) /
+                (1024L * 1024L)
+            ).toInt().coerceAtLeast(0)
         val memoryClassMb = activityManager?.memoryClass?.coerceAtLeast(1) ?: runtimeHeapMb
         val heapBudgetMb = minOf(runtimeHeapMb, memoryClassMb)
+        val availableHeapMb = (runtimeHeapMb - allocatedHeapMb).coerceAtLeast(1)
         val isLowRamDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
             activityManager?.isLowRamDevice == true
         } else {
@@ -2701,16 +2920,23 @@ class SteamSessionManager @Inject constructor(
         }
         val ceiling = when (mode) {
             DownloadPerformanceMode.Auto -> when {
-                isLowRamDevice || heapBudgetMb <= 256 -> 2
-                heapBudgetMb <= 384 -> 4
-                heapBudgetMb <= 512 -> 6
-                heapBudgetMb <= 768 -> 8
-                heapBudgetMb <= 1024 -> 10
+                availableHeapMb < 64 -> 2
+                heapBudgetMb <= 160 -> if (availableHeapMb >= 128) 3 else 2
+                heapBudgetMb <= 192 -> if (availableHeapMb >= 160) 4 else 3
+                isLowRamDevice && availableHeapMb < 96 -> 2
+                isLowRamDevice && heapBudgetMb <= 256 -> if (availableHeapMb >= 160) 4 else 3
+                isLowRamDevice -> if (availableHeapMb >= 160) 5 else 4
+                heapBudgetMb <= 256 -> 4
+                heapBudgetMb <= 384 -> 6
+                heapBudgetMb <= 512 -> 8
+                heapBudgetMb <= 768 -> 10
                 else -> 12
             }
 
             DownloadPerformanceMode.Compatibility -> when {
-                isLowRamDevice || heapBudgetMb <= 256 -> 1
+                availableHeapMb < 64 -> 1
+                heapBudgetMb <= 192 -> if (availableHeapMb >= 128) 2 else 1
+                isLowRamDevice || heapBudgetMb <= 256 -> 2
                 heapBudgetMb <= 384 -> 2
                 heapBudgetMb <= 512 -> 3
                 else -> 4
@@ -2727,6 +2953,9 @@ class SteamSessionManager @Inject constructor(
                     maxActiveRoutes = MAX_ACTIVE_CDN_ROUTES,
                     dispatcherRequestFloor = 8,
                     dispatcherPerHostFloor = 4,
+                    heapBudgetMb = heapBudgetMb,
+                    availableHeapMb = availableHeapMb,
+                    isLowRamDevice = isLowRamDevice,
                 )
 
             DownloadPerformanceMode.Compatibility ->
@@ -2738,6 +2967,9 @@ class SteamSessionManager @Inject constructor(
                     maxActiveRoutes = 2,
                     dispatcherRequestFloor = 4,
                     dispatcherPerHostFloor = 2,
+                    heapBudgetMb = heapBudgetMb,
+                    availableHeapMb = availableHeapMb,
+                    isLowRamDevice = isLowRamDevice,
                 )
         }
     }
@@ -2787,6 +3019,7 @@ class SteamSessionManager @Inject constructor(
     private suspend fun loadAuthenticatedCdnServers(
         contentHandler: SteamContent,
     ): List<Server> {
+        supportDiagnosticsStore.incrementCounter("steam_rpc_authenticated_cdn_servers")
         authenticatedCdnServersCache
             ?.takeIf { it.isFresh(CDN_SERVER_LIST_CACHE_MS) }
             ?.value
@@ -2816,6 +3049,7 @@ class SteamSessionManager @Inject constructor(
     private suspend fun loadAnonymousCdnServers(
         session: AnonymousContentSession,
     ): List<Server> {
+        supportDiagnosticsStore.incrementCounter("steam_rpc_anonymous_cdn_servers")
         anonymousCdnServersCache
             ?.takeIf { it.isFresh(CDN_SERVER_LIST_CACHE_MS) }
             ?.value
@@ -2851,8 +3085,9 @@ class SteamSessionManager @Inject constructor(
             .filter { !it.host.isNullOrBlank() || !it.vHost.isNullOrBlank() }
             .sortedWith(cdnServerComparator())
             .toList()
-        check(sorted.isNotEmpty()) { emptyMessage }
-        return sorted
+        val uniqueSorted = uniqueServersByHost(sorted)
+        check(uniqueSorted.isNotEmpty()) { emptyMessage }
+        return uniqueSorted
     }
 
     private fun createSeededServerListProvider(): MemoryServerListProvider {
@@ -2996,13 +3231,27 @@ class SteamSessionManager @Inject constructor(
 
     private fun cdnCooldownPriority(server: Server, now: Long): Int {
         val host = serverIdentity(server) ?: return 0
-        val blockedUntil = cdnFailureTracker[host] ?: return 0
-        return if (blockedUntil > now) 1 else 0
+        return cdnCooldownPriority(host, now)
+    }
+
+    private fun cdnCooldownPriority(hostName: String, now: Long): Int {
+        val normalized = hostName.lowercase()
+        val blockedUntil = cdnFailureTracker[normalized] ?: return 0
+        return if (blockedUntil > now) {
+            supportDiagnosticsStore.recordCdnCooldownHit(hostName)
+            1
+        } else {
+            0
+        }
+    }
+
+    private fun cdnLastSuccessPriority(hostName: String): Int {
+        return if (hostName.lowercase() == lastSuccessfulCdnHost) 0 else 1
     }
 
     private fun cdnLastSuccessPriority(server: Server): Int {
         val host = serverIdentity(server) ?: return 1
-        return if (host == lastSuccessfulCdnHost) 0 else 1
+        return cdnLastSuccessPriority(host)
     }
 
     private fun serverIdentity(server: Server): String? {
@@ -3618,6 +3867,7 @@ class SteamSessionManager @Inject constructor(
     }
 
     private fun onConnected(@Suppress("UNUSED_PARAMETER") callback: ConnectedCallback) {
+        supportDiagnosticsStore.recordRecoveryEvent(action = "connected")
         Log.i(LOG_TAG, "onConnected")
         isConnected = true
         connectDeferred?.complete(Unit)
@@ -3631,6 +3881,13 @@ class SteamSessionManager @Inject constructor(
     }
 
     private fun onDisconnected(callback: DisconnectedCallback) {
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = "disconnected",
+            fields = mapOf(
+                "userInitiated" to callback.isUserInitiated.toString(),
+                "manualLogout" to manualLogout.toString(),
+            ),
+        )
         Log.w(
             LOG_TAG,
             "onDisconnected userInitiated=${callback.isUserInitiated} manualLogout=$manualLogout",
@@ -3680,6 +3937,10 @@ class SteamSessionManager @Inject constructor(
     }
 
     private fun onLoggedOn(callback: LoggedOnCallback) {
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = "logged_on",
+            fields = mapOf("result" to callback.result.name),
+        )
         Log.i(LOG_TAG, "onLoggedOn result=${callback.result}")
         if (callback.result == EResult.OK) {
             preferredConnectionProfileLabel = activeConnectionProfile.label
@@ -3701,12 +3962,6 @@ class SteamSessionManager @Inject constructor(
             )
             logonDeferred?.complete(Result.success(session))
             logonDeferred = null
-            appScope.launch {
-                runCatching { prewarmAnonymousContentSession() }
-                    .onFailure { throwable ->
-                        Log.w(LOG_TAG, "anonymous download access prewarm after logon failed", throwable)
-                    }
-            }
             return
         }
 
@@ -3723,6 +3978,13 @@ class SteamSessionManager @Inject constructor(
     }
 
     private fun onLoggedOff(callback: LoggedOffCallback) {
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = "logged_off",
+            fields = mapOf(
+                "result" to callback.result.name,
+                "manualLogout" to manualLogout.toString(),
+            ),
+        )
         Log.w(LOG_TAG, "onLoggedOff result=${callback.result} manualLogout=$manualLogout")
         if (_sessionState.value.isRestoring) {
             Log.w(LOG_TAG, "onLoggedOff while restoring; skip nested recovery")
@@ -3735,6 +3997,10 @@ class SteamSessionManager @Inject constructor(
 
     private fun scheduleSessionRecovery(reason: String) {
         if (recoveryJob?.isActive == true) return
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = "schedule_recovery",
+            fields = mapOf("reason" to reason),
+        )
         Log.w(LOG_TAG, "scheduleSessionRecovery reason=$reason")
 
         recoveryJob = appScope.launch {

@@ -6,7 +6,10 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.slay.workshopnative.core.logging.AppLog
+import com.slay.workshopnative.core.logging.SupportDiagnosticsStore
 import com.slay.workshopnative.core.storage.buildDownloadDestinationLabel
+import com.slay.workshopnative.core.util.buildAccountBindingHash
+import com.slay.workshopnative.core.util.resolveAccountBindingHash
 import com.slay.workshopnative.core.util.sanitizeFileName
 import com.slay.workshopnative.data.local.DownloadAuthMode
 import com.slay.workshopnative.data.local.DownloadStatus
@@ -19,8 +22,11 @@ import com.slay.workshopnative.worker.WorkshopDownloadWorker
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Singleton
@@ -29,6 +35,7 @@ class DownloadsRepositoryImpl @Inject constructor(
     private val downloadTaskDao: DownloadTaskDao,
     private val preferencesStore: UserPreferencesStore,
     private val steamRepository: SteamRepository,
+    private val supportDiagnosticsStore: SupportDiagnosticsStore,
 ) : DownloadsRepository {
     companion object {
         private const val LOG_TAG = "DownloadsRepository"
@@ -36,8 +43,7 @@ class DownloadsRepositoryImpl @Inject constructor(
 
     private data class DownloadBinding(
         val authMode: DownloadAuthMode,
-        val boundAccountName: String?,
-        val boundSteamId64: Long?,
+        val boundAccountKeyHash: String?,
     )
 
     private val activeStatuses = setOf(
@@ -45,10 +51,26 @@ class DownloadsRepositoryImpl @Inject constructor(
         DownloadStatus.Running,
         DownloadStatus.Paused,
     )
+    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override val downloads: Flow<List<DownloadTaskEntity>> = downloadTaskDao.observeAll()
 
+    init {
+        repositoryScope.launch {
+            sanitizeLegacyTaskBindings()
+        }
+    }
+
     override suspend fun enqueue(item: WorkshopItem): Result<Unit> {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "enqueue_requested",
+            taskId = item.publishedFileId.takeIf { it > 0L }?.let { "pf:$it" },
+            fields = mapOf(
+                "publishedFileId" to item.publishedFileId.toString(),
+                "appId" to item.appId.toString(),
+                "canDownload" to item.canDownload.toString(),
+            ),
+        )
         AppLog.i(
             LOG_TAG,
             "enqueue requested publishedFileId=${item.publishedFileId} appId=${item.appId} canDownload=${item.canDownload}",
@@ -67,6 +89,14 @@ class DownloadsRepositoryImpl @Inject constructor(
         }
 
         if (!preparedItem.canDownload) {
+            supportDiagnosticsStore.recordDownloadEvent(
+                action = "enqueue_unavailable",
+                taskId = preparedItem.publishedFileId.takeIf { it > 0L }?.let { "pf:$it" },
+                fields = mapOf(
+                    "publishedFileId" to preparedItem.publishedFileId.toString(),
+                    "reason" to "cannot_download",
+                ),
+            )
             AppLog.w(
                 LOG_TAG,
                 "enqueue rejected because item is unavailable publishedFileId=${preparedItem.publishedFileId}",
@@ -86,6 +116,7 @@ class DownloadsRepositoryImpl @Inject constructor(
                     storageRootRef = null,
                     destinationLabel = "不可下载",
                     downloadAuthMode = DownloadAuthMode.Anonymous,
+                    boundAccountKeyHash = null,
                     boundAccountName = null,
                     boundSteamId64 = null,
                     runtimeRouteLabel = null,
@@ -128,8 +159,14 @@ class DownloadsRepositoryImpl @Inject constructor(
             prefs.preferAnonymousDownloads -> DownloadAuthMode.Auto
             else -> DownloadAuthMode.Authenticated
         }
-        val boundAccountName = if (authMode == DownloadAuthMode.Anonymous) null else session.account?.accountName
-        val boundSteamId64 = if (authMode == DownloadAuthMode.Anonymous) null else session.account?.steamId64
+        val boundAccountKeyHash = if (authMode == DownloadAuthMode.Anonymous) {
+            null
+        } else {
+            buildAccountBindingHash(
+                accountName = session.account?.accountName,
+                steamId64 = session.account?.steamId64,
+            )
+        }
         val now = System.currentTimeMillis()
 
         downloadTaskDao.upsert(
@@ -149,8 +186,9 @@ class DownloadsRepositoryImpl @Inject constructor(
                     folderName = downloadFolderName,
                 ),
                 downloadAuthMode = authMode,
-                boundAccountName = boundAccountName,
-                boundSteamId64 = boundSteamId64,
+                boundAccountKeyHash = boundAccountKeyHash,
+                boundAccountName = null,
+                boundSteamId64 = null,
                 runtimeRouteLabel = null,
                 runtimeTransportLabel = null,
                 runtimeEndpointLabel = null,
@@ -169,6 +207,16 @@ class DownloadsRepositoryImpl @Inject constructor(
                 updatedAt = now,
             ),
         )
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "enqueue_scheduled",
+            taskId = taskId,
+            fields = mapOf(
+                "publishedFileId" to preparedItem.publishedFileId.toString(),
+                "appId" to preparedItem.appId.toString(),
+                "authMode" to authMode.name,
+                "hasBindingHash" to (!boundAccountKeyHash.isNullOrBlank()).toString(),
+            ),
+        )
 
         workManager.enqueueUniqueWork(
             taskId,
@@ -184,8 +232,7 @@ class DownloadsRepositoryImpl @Inject constructor(
                 publishedFileId = preparedItem.publishedFileId,
                 contentManifestId = preparedItem.contentManifestId,
                 downloadAuthMode = authMode,
-                boundAccountName = boundAccountName,
-                boundSteamId64 = boundSteamId64,
+                boundAccountKeyHash = boundAccountKeyHash,
             ),
         )
         AppLog.i(
@@ -196,6 +243,10 @@ class DownloadsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun retry(taskId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "retry_requested",
+            taskId = taskId,
+        )
         val existing = downloadTaskDao.getById(taskId)
             ?: return@withContext Result.failure(IllegalArgumentException("下载任务不存在"))
 
@@ -210,6 +261,10 @@ class DownloadsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun pause(taskId: String) = withContext(Dispatchers.IO) {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "pause_requested",
+            taskId = taskId,
+        )
         val existing = downloadTaskDao.getById(taskId) ?: return@withContext
         if (existing.status != DownloadStatus.Queued && existing.status != DownloadStatus.Running) {
             return@withContext
@@ -233,6 +288,10 @@ class DownloadsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun resume(taskId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "resume_requested",
+            taskId = taskId,
+        )
         val existing = downloadTaskDao.getById(taskId)
             ?: return@withContext Result.failure(IllegalArgumentException("下载任务不存在"))
         if (existing.status != DownloadStatus.Paused) {
@@ -248,6 +307,13 @@ class DownloadsRepositoryImpl @Inject constructor(
         downloadTaskDao.upsert(
             existing.copy(
                 status = DownloadStatus.Queued,
+                boundAccountKeyHash = resolveAccountBindingHash(
+                    existing.boundAccountKeyHash,
+                    existing.boundAccountName,
+                    existing.boundSteamId64,
+                ),
+                boundAccountName = null,
+                boundSteamId64 = null,
                 errorMessage = null,
                 pauseRequested = false,
                 runtimeRouteLabel = null,
@@ -275,8 +341,11 @@ class DownloadsRepositoryImpl @Inject constructor(
                 publishedFileId = existing.publishedFileId,
                 contentManifestId = latestItem?.contentManifestId ?: 0L,
                 downloadAuthMode = existing.downloadAuthMode,
-                boundAccountName = existing.boundAccountName,
-                boundSteamId64 = existing.boundSteamId64,
+                boundAccountKeyHash = resolveAccountBindingHash(
+                    existing.boundAccountKeyHash,
+                    existing.boundAccountName,
+                    existing.boundSteamId64,
+                ),
             ),
         )
 
@@ -284,6 +353,10 @@ class DownloadsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun cancel(taskId: String) {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "cancel_requested",
+            taskId = taskId,
+        )
         AppLog.i(LOG_TAG, "cancel requested taskId=$taskId")
         workManager.cancelUniqueWork(taskId)
         val existing = downloadTaskDao.getById(taskId) ?: return
@@ -300,6 +373,10 @@ class DownloadsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun delete(taskId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "delete_requested",
+            taskId = taskId,
+        )
         val existing = downloadTaskDao.getById(taskId)
             ?: return@withContext Result.failure(IllegalArgumentException("下载任务不存在"))
         if (
@@ -316,33 +393,46 @@ class DownloadsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun clearInactiveHistory(): Int = withContext(Dispatchers.IO) {
+        supportDiagnosticsStore.recordDownloadEvent(action = "clear_inactive_history")
         downloadTaskDao.clearInactiveTasks()
     }
 
     override suspend fun clearInactiveDiagnostics(): Int = withContext(Dispatchers.IO) {
+        supportDiagnosticsStore.recordDownloadEvent(action = "clear_inactive_diagnostics")
         downloadTaskDao.clearInactiveRuntimeDetails(updatedAt = System.currentTimeMillis())
     }
 
     override suspend fun rebindRetryableTasksToCurrentSession() = withContext(Dispatchers.IO) {
         val binding = currentAuthenticatedBinding() ?: return@withContext
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "rebind_retryable_tasks",
+            fields = mapOf(
+                "authMode" to binding.authMode.name,
+                "hasBindingHash" to (!binding.boundAccountKeyHash.isNullOrBlank()).toString(),
+            ),
+        )
         val now = System.currentTimeMillis()
         downloadTaskDao.getAll()
             .filter { task ->
-                task.publishedFileId > 0L &&
+                    task.publishedFileId > 0L &&
                     task.status != DownloadStatus.Running &&
                     task.status != DownloadStatus.Success &&
                     (
                         task.downloadAuthMode != binding.authMode ||
-                            task.boundSteamId64 != binding.boundSteamId64 ||
-                            task.boundAccountName != binding.boundAccountName
+                            resolveAccountBindingHash(
+                                task.boundAccountKeyHash,
+                                task.boundAccountName,
+                                task.boundSteamId64,
+                            ) != binding.boundAccountKeyHash
                     )
             }
             .forEach { task ->
                 downloadTaskDao.upsert(
                     task.copy(
                         downloadAuthMode = binding.authMode,
-                        boundAccountName = binding.boundAccountName,
-                        boundSteamId64 = binding.boundSteamId64,
+                        boundAccountKeyHash = binding.boundAccountKeyHash,
+                        boundAccountName = null,
+                        boundSteamId64 = null,
                         updatedAt = now,
                     ),
                 )
@@ -350,9 +440,14 @@ class DownloadsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun enforceAnonymousOnly(reason: String) = withContext(Dispatchers.IO) {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "enforce_anonymous_only",
+            fields = mapOf("reason" to reason),
+        )
         val now = System.currentTimeMillis()
         downloadTaskDao.getAll().forEach { task ->
             if (task.downloadAuthMode == DownloadAuthMode.Anonymous &&
+                task.boundAccountKeyHash.isNullOrBlank() &&
                 task.boundAccountName.isNullOrBlank() &&
                 task.boundSteamId64 == null
             ) {
@@ -373,6 +468,7 @@ class DownloadsRepositoryImpl @Inject constructor(
                     targetTreeUri = if (task.status in activeStatuses) null else task.targetTreeUri,
                     storageRootRef = null,
                     downloadAuthMode = DownloadAuthMode.Anonymous,
+                    boundAccountKeyHash = null,
                     boundAccountName = null,
                     boundSteamId64 = null,
                     runtimeRouteLabel = null,
@@ -460,6 +556,14 @@ class DownloadsRepositoryImpl @Inject constructor(
         task: DownloadTaskEntity,
         message: String,
     ) {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "task_interrupted",
+            taskId = task.taskId,
+            fields = mapOf(
+                "publishedFileId" to task.publishedFileId.toString(),
+                "message" to message,
+            ),
+        )
         AppLog.w(
             LOG_TAG,
             "markTaskInterrupted taskId=${task.taskId} publishedFileId=${task.publishedFileId} message=$message",
@@ -476,10 +580,46 @@ class DownloadsRepositoryImpl @Inject constructor(
         )
     }
 
+    private suspend fun sanitizeLegacyTaskBindings() = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        downloadTaskDao.getAll().forEach { task ->
+            val normalizedHash = when {
+                task.downloadAuthMode == DownloadAuthMode.Anonymous -> null
+                task.status !in activeStatuses -> null
+                else -> resolveAccountBindingHash(
+                    task.boundAccountKeyHash,
+                    task.boundAccountName,
+                    task.boundSteamId64,
+                )
+            }
+            val alreadySanitized =
+                task.boundAccountName.isNullOrBlank() &&
+                    task.boundSteamId64 == null &&
+                    task.boundAccountKeyHash == normalizedHash
+            if (alreadySanitized) return@forEach
+            downloadTaskDao.upsert(
+                task.copy(
+                    boundAccountKeyHash = normalizedHash,
+                    boundAccountName = null,
+                    boundSteamId64 = null,
+                    updatedAt = now,
+                ),
+            )
+        }
+    }
+
     private suspend fun requeueExistingTask(
         existing: DownloadTaskEntity,
         latestItem: WorkshopItem,
     ) {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "requeue_existing_task",
+            taskId = existing.taskId,
+            fields = mapOf(
+                "publishedFileId" to existing.publishedFileId.toString(),
+                "latestCanDownload" to latestItem.canDownload.toString(),
+            ),
+        )
         removeDuplicateEntries(existing)
 
         if (!latestItem.canDownload) {
@@ -510,8 +650,11 @@ class DownloadsRepositoryImpl @Inject constructor(
         )
         val binding = currentAuthenticatedBinding() ?: DownloadBinding(
             authMode = existing.downloadAuthMode,
-            boundAccountName = existing.boundAccountName,
-            boundSteamId64 = existing.boundSteamId64,
+            boundAccountKeyHash = resolveAccountBindingHash(
+                existing.boundAccountKeyHash,
+                existing.boundAccountName,
+                existing.boundSteamId64,
+            ),
         )
 
         downloadTaskDao.upsert(
@@ -524,8 +667,9 @@ class DownloadsRepositoryImpl @Inject constructor(
                 fileName = fileName,
                 totalBytes = latestItem.fileSize.takeIf { it > 0L } ?: existing.totalBytes,
                 downloadAuthMode = binding.authMode,
-                boundAccountName = binding.boundAccountName,
-                boundSteamId64 = binding.boundSteamId64,
+                boundAccountKeyHash = binding.boundAccountKeyHash,
+                boundAccountName = null,
+                boundSteamId64 = null,
                 runtimeRouteLabel = null,
                 runtimeTransportLabel = null,
                 runtimeEndpointLabel = null,
@@ -554,8 +698,7 @@ class DownloadsRepositoryImpl @Inject constructor(
                 publishedFileId = latestItem.publishedFileId,
                 contentManifestId = latestItem.contentManifestId,
                 downloadAuthMode = binding.authMode,
-                boundAccountName = binding.boundAccountName,
-                boundSteamId64 = binding.boundSteamId64,
+                boundAccountKeyHash = binding.boundAccountKeyHash,
             ),
         )
     }
@@ -572,13 +715,20 @@ class DownloadsRepositoryImpl @Inject constructor(
         }
         return DownloadBinding(
             authMode = authMode,
-            boundAccountName = session.account?.accountName,
-            boundSteamId64 = session.account?.steamId64,
+            boundAccountKeyHash = buildAccountBindingHash(
+                accountName = session.account?.accountName,
+                steamId64 = session.account?.steamId64,
+            ),
         )
     }
 
     private suspend fun prepareItemForDownload(item: WorkshopItem): WorkshopItem {
         if (!item.needsDownloadPreparation()) return item
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "prepare_item_for_download",
+            taskId = item.publishedFileId.takeIf { it > 0L }?.let { "pf:$it" },
+            fields = mapOf("publishedFileId" to item.publishedFileId.toString()),
+        )
         return runCatching {
             steamRepository.resolveWorkshopItemForDownload(item.publishedFileId).getOrThrow()
         }.getOrElse { item }
@@ -620,8 +770,7 @@ class DownloadsRepositoryImpl @Inject constructor(
         publishedFileId: Long,
         contentManifestId: Long,
         downloadAuthMode: DownloadAuthMode,
-        boundAccountName: String?,
-        boundSteamId64: Long?,
+        boundAccountKeyHash: String?,
     ) = OneTimeWorkRequestBuilder<WorkshopDownloadWorker>()
         .setInputData(
             Data.Builder()
@@ -635,8 +784,7 @@ class DownloadsRepositoryImpl @Inject constructor(
                 .putLong(WorkshopDownloadWorker.KEY_PUBLISHED_FILE_ID, publishedFileId)
                 .putLong(WorkshopDownloadWorker.KEY_CONTENT_MANIFEST_ID, contentManifestId)
                 .putString(WorkshopDownloadWorker.KEY_DOWNLOAD_AUTH_MODE, downloadAuthMode.name)
-                .putString(WorkshopDownloadWorker.KEY_BOUND_ACCOUNT_NAME, boundAccountName)
-                .putLong(WorkshopDownloadWorker.KEY_BOUND_STEAM_ID64, boundSteamId64 ?: 0L)
+                .putString(WorkshopDownloadWorker.KEY_BOUND_ACCOUNT_KEY_HASH, boundAccountKeyHash)
                 .build(),
         )
         .addTag(WorkshopDownloadWorker.TAG_DOWNLOAD)

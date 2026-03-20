@@ -5,15 +5,12 @@ import androidx.lifecycle.viewModelScope
 import com.slay.workshopnative.core.logging.AppLog
 import com.slay.workshopnative.data.local.DownloadTaskEntity
 import com.slay.workshopnative.data.repository.DownloadsRepository
-import com.slay.workshopnative.data.repository.SteamRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -21,7 +18,6 @@ import kotlinx.coroutines.launch
 @HiltViewModel
 class DownloadsViewModel @Inject constructor(
     private val downloadsRepository: DownloadsRepository,
-    private val steamRepository: SteamRepository,
 ) : ViewModel() {
     private companion object {
         const val LOG_TAG = "DownloadsViewModel"
@@ -32,9 +28,6 @@ class DownloadsViewModel @Inject constructor(
 
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val messages = _messages.asSharedFlow()
-    private val _gameTitles = MutableStateFlow<Map<Int, String>>(emptyMap())
-    val gameTitles = _gameTitles.asStateFlow()
-    private val requestedGameTitles = linkedSetOf<Int>()
 
     init {
         viewModelScope.launch {
@@ -111,29 +104,6 @@ class DownloadsViewModel @Inject constructor(
                     "没有可清理的历史记录"
                 },
             )
-        }
-    }
-
-    fun prefetchGameTitles(appIds: Collection<Int>) {
-        val targets = appIds
-            .filter { it > 0 }
-            .distinct()
-            .filter { appId ->
-                appId !in requestedGameTitles && !_gameTitles.value.containsKey(appId)
-            }
-        if (targets.isEmpty()) return
-
-        requestedGameTitles += targets
-        viewModelScope.launch {
-            targets.forEach { appId ->
-                steamRepository.loadGameDetails(appId)
-                    .getOrNull()
-                    ?.title
-                    ?.takeIf(String::isNotBlank)
-                    ?.let { title ->
-                        _gameTitles.value = _gameTitles.value + (appId to title)
-                    }
-            }
         }
     }
 }
