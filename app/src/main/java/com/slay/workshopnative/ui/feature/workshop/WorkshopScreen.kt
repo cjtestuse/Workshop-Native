@@ -104,6 +104,11 @@ import com.slay.workshopnative.ui.components.ArtworkThumbnail
 import com.slay.workshopnative.ui.components.ExpandableBodyText
 import com.slay.workshopnative.ui.components.TranslatableDescriptionCard
 import com.slay.workshopnative.ui.components.WorkshopNativeModalBottomSheet
+import com.slay.workshopnative.ui.theme.LocalWorkshopDarkTheme
+import com.slay.workshopnative.ui.theme.workshopAdaptiveBorderColor
+import com.slay.workshopnative.ui.theme.workshopAdaptiveGradientBrush
+import com.slay.workshopnative.ui.theme.workshopAdaptiveOverlayColor
+import com.slay.workshopnative.ui.theme.workshopAdaptiveSurfaceColor
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -129,12 +134,15 @@ fun WorkshopScreen(
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
     var showFilters by rememberSaveable { mutableStateOf(false) }
+    var showSourcePicker by rememberSaveable { mutableStateOf(false) }
     var showSectionPicker by rememberSaveable { mutableStateOf(false) }
     var showSortPicker by rememberSaveable { mutableStateOf(false) }
     var showPeriodPicker by rememberSaveable { mutableStateOf(false) }
     var searchText by rememberSaveable(appId, launchMode.name) { mutableStateOf("") }
     var isSearchFieldFocused by rememberSaveable(appId, launchMode.name) { mutableStateOf(false) }
     var suppressExitBackAfterSearch by rememberSaveable(appId, launchMode.name) { mutableStateOf(false) }
+    val isBrowseMode = state.launchMode == WorkshopLaunchMode.Browse
+    val isAccountQueryMode = state.launchMode == WorkshopLaunchMode.AccountQuery
     val isSubscriptionMode = state.launchMode == WorkshopLaunchMode.Subscriptions
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
 
@@ -148,6 +156,15 @@ fun WorkshopScreen(
         if (!suppressExitBackAfterSearch) return@LaunchedEffect
         delay(650)
         suppressExitBackAfterSearch = false
+    }
+
+    LaunchedEffect(state.launchMode) {
+        if (!isBrowseMode) {
+            showFilters = false
+            showSectionPicker = false
+            showSortPicker = false
+            showPeriodPicker = false
+        }
     }
 
     BackHandler(enabled = !isSubscriptionMode && (isSearchFieldFocused || imeVisible || suppressExitBackAfterSearch)) {
@@ -211,10 +228,13 @@ fun WorkshopScreen(
                 launchMode = state.launchMode,
                 onBack = onBack,
                 onRefresh = viewModel::refresh,
+                onOpenSourcePicker = { showSourcePicker = true },
                 onOpenFilters = { showFilters = true },
                 onOpenSectionPicker = { showSectionPicker = true },
                 onOpenSortPicker = { showSortPicker = true },
                 onOpenPeriodPicker = { showPeriodPicker = true },
+                canOpenAccountQuery = state.canOpenAccountQuery,
+                onOpenAccountQuery = viewModel::openAccountQueryMode,
                 canOpenSubscriptions = state.canOpenSubscriptions,
                 onOpenSubscriptions = viewModel::openSubscriptionsMode,
                 onSwitchToBrowse = viewModel::switchToBrowseMode,
@@ -247,6 +267,7 @@ fun WorkshopScreen(
                 WorkshopLoadingCard(
                     modifier = Modifier.weight(1f),
                     appName = state.appName,
+                    launchMode = state.launchMode,
                     autoResolveDownloadInfo = state.autoResolveDownloadInfo,
                 )
             } else if (state.items.isEmpty()) {
@@ -274,6 +295,71 @@ fun WorkshopScreen(
                                 shape = RoundedCornerShape(18.dp),
                             ) {
                                 Text("浏览全部工坊")
+                            }
+                        }
+                    }
+                } else if (isAccountQueryMode && state.query.searchText.isBlank()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shape = RoundedCornerShape(24.dp),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Text(
+                                text = "输入关键词后，使用当前 Steam 账号查询账号可见的工坊条目。",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "这类结果可能不会出现在公开工坊页面里，适合查找只在登录视角下可见的条目。",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                } else if (isAccountQueryMode) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shape = RoundedCornerShape(24.dp),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Text(
+                                text = "当前账号可见范围内没有匹配条目。",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "可以尝试更换关键词，或切回公开工坊继续浏览。",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (state.canOpenSubscriptions) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Button(
+                                        onClick = viewModel::switchToBrowseMode,
+                                        shape = RoundedCornerShape(18.dp),
+                                    ) {
+                                        Text("公开工坊")
+                                    }
+                                    OutlinedButton(
+                                        onClick = viewModel::openSubscriptionsMode,
+                                        shape = RoundedCornerShape(18.dp),
+                                    ) {
+                                        Text("我的订阅")
+                                    }
+                                }
+                            } else {
+                                Button(
+                                    onClick = viewModel::switchToBrowseMode,
+                                    shape = RoundedCornerShape(18.dp),
+                                ) {
+                                    Text("公开工坊")
+                                }
                             }
                         }
                     }
@@ -336,7 +422,7 @@ fun WorkshopScreen(
         )
     }
 
-    if (!isSubscriptionMode && showFilters) {
+    if (isBrowseMode && showFilters) {
         FilterSheet(
             currentQuery = state.query,
             tagGroups = state.tagGroups,
@@ -368,7 +454,34 @@ fun WorkshopScreen(
             ?: fallbackPeriodOptions(state.query.periodDays)
     }
 
-    if (!isSubscriptionMode && showSectionPicker) {
+    val sourcePickerOptions = remember(state.canOpenAccountQuery) {
+        buildList {
+            add(WorkshopLaunchMode.Browse.name to launchModeLabel(WorkshopLaunchMode.Browse))
+            if (state.canOpenAccountQuery) {
+                add(WorkshopLaunchMode.AccountQuery.name to launchModeLabel(WorkshopLaunchMode.AccountQuery))
+            }
+        }
+    }
+
+    if (showSourcePicker) {
+        QuickChoiceSheet(
+            title = "查询来源",
+            subtitle = "公开工坊只能看到公开可见结果；账号可见会走当前 Steam 登录态查询。",
+            options = sourcePickerOptions,
+            selectedKey = state.launchMode.name,
+            onDismiss = { showSourcePicker = false },
+            onSelect = { selectedKey ->
+                showSourcePicker = false
+                when (WorkshopLaunchMode.entries.firstOrNull { it.name == selectedKey } ?: state.launchMode) {
+                    WorkshopLaunchMode.Browse -> viewModel.switchToBrowseMode()
+                    WorkshopLaunchMode.AccountQuery -> viewModel.openAccountQueryMode()
+                    WorkshopLaunchMode.Subscriptions -> viewModel.openSubscriptionsMode()
+                }
+            },
+        )
+    }
+
+    if (isBrowseMode && showSectionPicker) {
         QuickChoiceSheet(
             title = "内容区",
             subtitle = "切换当前浏览的 Workshop 内容分类",
@@ -382,7 +495,7 @@ fun WorkshopScreen(
         )
     }
 
-    if (!isSubscriptionMode && showSortPicker) {
+    if (isBrowseMode && showSortPicker) {
         QuickChoiceSheet(
             title = "排序",
             subtitle = "选择列表结果的排列方式",
@@ -407,7 +520,7 @@ fun WorkshopScreen(
         )
     }
 
-    if (!isSubscriptionMode && showPeriodPicker) {
+    if (isBrowseMode && showPeriodPicker) {
         QuickChoiceSheet(
             title = "时间范围",
             subtitle = "只对支持趋势排序的方式生效",
@@ -463,15 +576,17 @@ fun WorkshopScreen(
 private fun WorkshopLoadingCard(
     modifier: Modifier = Modifier,
     appName: String,
+    launchMode: WorkshopLaunchMode,
     autoResolveDownloadInfo: Boolean,
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(28.dp),
-        color = Color.White.copy(alpha = 0.82f),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.82f)),
         shadowElevation = 8.dp,
         tonalElevation = 2.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor()),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier
@@ -483,21 +598,38 @@ private fun WorkshopLoadingCard(
             Spacer(modifier = Modifier.height(8.dp))
             CircularProgressIndicator()
             Text(
-                text = if (appName.isBlank()) "正在读取创意工坊" else "正在读取 $appName 创意工坊",
+                text = when (launchMode) {
+                    WorkshopLaunchMode.Browse ->
+                        if (appName.isBlank()) "正在读取创意工坊" else "正在读取 $appName 创意工坊"
+                    WorkshopLaunchMode.AccountQuery ->
+                        if (appName.isBlank()) "正在查询账号可见条目" else "正在查询 $appName 的账号可见条目"
+                    WorkshopLaunchMode.Subscriptions ->
+                        if (appName.isBlank()) "正在同步我的订阅" else "正在同步 $appName 的我的订阅"
+                },
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = if (autoResolveDownloadInfo) {
-                    "正在加载 Steam 列表，可见条目的下载方式会在列表出现后继续补齐。"
-                } else {
-                    "正在加载 Steam 列表，条目详情和下载方式会在点开时按需补齐。"
+                text = when (launchMode) {
+                    WorkshopLaunchMode.Browse -> if (autoResolveDownloadInfo) {
+                        "正在加载 Steam 列表，可见条目的下载方式会在列表出现后继续补齐。"
+                    } else {
+                        "正在加载 Steam 列表，条目详情和下载方式会在点开时按需补齐。"
+                    }
+                    WorkshopLaunchMode.AccountQuery ->
+                        "正在使用当前 Steam 账号查询可见条目，某些结果可能不会出现在公开工坊里。"
+                    WorkshopLaunchMode.Subscriptions ->
+                        "正在读取当前账号已订阅的条目，不会对订阅状态做任何修改。"
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "当前阶段：获取工坊列表与筛选条件",
+                text = when (launchMode) {
+                    WorkshopLaunchMode.Browse -> "当前阶段：获取工坊列表与筛选条件"
+                    WorkshopLaunchMode.AccountQuery -> "当前阶段：使用登录态检索账号可见结果"
+                    WorkshopLaunchMode.Subscriptions -> "当前阶段：同步当前账号的订阅条目"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -518,10 +650,13 @@ private fun WorkshopTopBarModern(
     searchText: String,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
+    onOpenSourcePicker: () -> Unit,
     onOpenFilters: () -> Unit,
     onOpenSectionPicker: () -> Unit,
     onOpenSortPicker: () -> Unit,
     onOpenPeriodPicker: () -> Unit,
+    canOpenAccountQuery: Boolean,
+    onOpenAccountQuery: () -> Unit,
     canOpenSubscriptions: Boolean,
     onOpenSubscriptions: () -> Unit,
     onSwitchToBrowse: () -> Unit,
@@ -533,19 +668,32 @@ private fun WorkshopTopBarModern(
     sortOptions: List<WorkshopBrowseSortOption>,
     periodOptions: List<WorkshopBrowsePeriodOption>,
 ) {
+    val darkTheme = LocalWorkshopDarkTheme.current
     val advancedFilterCount = query.activeAdvancedFilterCount()
     val supportsPeriod = query.sortKey == WorkshopBrowseQuery.SORT_TREND
+    val isBrowseMode = launchMode == WorkshopLaunchMode.Browse
+    val isAccountQueryMode = launchMode == WorkshopLaunchMode.AccountQuery
     val isSubscriptionMode = launchMode == WorkshopLaunchMode.Subscriptions
     val isInitialSync = !hasLoadedOnce
-    val headerEyebrow = if (isSubscriptionMode) "我的订阅" else "创意工坊"
+    val headerEyebrow = when (launchMode) {
+        WorkshopLaunchMode.Browse -> "公开工坊"
+        WorkshopLaunchMode.AccountQuery -> "账号可见"
+        WorkshopLaunchMode.Subscriptions -> "我的订阅"
+    }
     val currentSectionLabel = resolveSectionLabel(query.sectionKey, sectionOptions)
     val currentSortLabel = resolveSortLabel(query.sortKey, sortOptions)
     val currentPeriodLabel = resolvePeriodLabel(query.periodDays, periodOptions)
     val headerMeta = buildList {
         if (!isInitialSync) {
-            add(if (isSubscriptionMode) "已订阅 $totalCount 项" else "$totalCount 个条目")
+            add(
+                when (launchMode) {
+                    WorkshopLaunchMode.Browse -> "$totalCount 个条目"
+                    WorkshopLaunchMode.AccountQuery -> "$totalCount 个结果"
+                    WorkshopLaunchMode.Subscriptions -> "已订阅 $totalCount 项"
+                },
+            )
         }
-        if (!isSubscriptionMode) {
+        if (isBrowseMode) {
             if (query.sectionKey != WorkshopBrowseQuery.SECTION_ITEMS) {
                 add(currentSectionLabel)
             }
@@ -556,22 +704,30 @@ private fun WorkshopTopBarModern(
         }
     }.joinToString(" · ")
     val statusMessage = if (isRefreshing || isInitialSync) {
-        if (isSubscriptionMode) "正在同步你的订阅条目" else "正在同步工坊内容"
+        when (launchMode) {
+            WorkshopLaunchMode.Browse -> "正在同步工坊内容"
+            WorkshopLaunchMode.AccountQuery -> "正在查询账号可见条目"
+            WorkshopLaunchMode.Subscriptions -> "正在同步你的订阅条目"
+        }
     } else {
         null
     }
-    val headerDescription = if (isSubscriptionMode) {
-        "只读取当前账号已订阅的条目，不会执行任何订阅变更。"
-    } else {
-        ""
+    val headerDescription = when (launchMode) {
+        WorkshopLaunchMode.Browse -> ""
+        WorkshopLaunchMode.AccountQuery -> "使用当前 Steam 账号查询账号可见条目；某些结果不会出现在公开工坊页面。"
+        WorkshopLaunchMode.Subscriptions -> "只读取当前账号已订阅的条目，不会执行任何订阅变更。"
     }
 
     Surface(
         shape = RoundedCornerShape(26.dp),
-        color = Color(0xFFF7F1EA).copy(alpha = 0.96f),
+        color = workshopAdaptiveSurfaceColor(
+            light = Color(0xFFF7F1EA).copy(alpha = 0.96f),
+            dark = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
+        ),
         tonalElevation = 2.dp,
         shadowElevation = 6.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.5f))),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier
@@ -579,9 +735,21 @@ private fun WorkshopTopBarModern(
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            Color.White.copy(alpha = 0.82f),
-                            Color(0xFFFFF7EF).copy(alpha = 0.64f),
-                            Color(0xFFF2E5D7).copy(alpha = 0.38f),
+                            if (darkTheme) {
+                                MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.98f)
+                            } else {
+                                Color.White.copy(alpha = 0.82f)
+                            },
+                            if (darkTheme) {
+                                MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.9f)
+                            } else {
+                                Color(0xFFFFF7EF).copy(alpha = 0.64f)
+                            },
+                            if (darkTheme) {
+                                MaterialTheme.colorScheme.surface.copy(alpha = 0.78f)
+                            } else {
+                                Color(0xFFF2E5D7).copy(alpha = 0.38f)
+                            },
                         ),
                     ),
                 )
@@ -611,7 +779,11 @@ private fun WorkshopTopBarModern(
                             text = headerEyebrow,
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFFB36B42),
+                            color = if (darkTheme) {
+                                MaterialTheme.colorScheme.tertiary
+                            } else {
+                                Color(0xFFB36B42)
+                            },
                         )
                         if (headerMeta.isNotBlank()) {
                             Text(
@@ -638,15 +810,26 @@ private fun WorkshopTopBarModern(
                             Box(
                                 modifier = Modifier
                                     .size(6.dp)
-                                    .background(Color(0xFFE28954), CircleShape),
+                                    .background(
+                                        if (darkTheme) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            Color(0xFFE28954)
+                                        },
+                                        CircleShape,
+                                    ),
                             )
                             Text(
                                 text = statusMessage,
                                 style = MaterialTheme.typography.labelMedium,
-                                color = Color(0xFF9A5B38),
+                                color = if (darkTheme) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    Color(0xFF9A5B38)
+                                },
                             )
                         }
-                    } else if (isSubscriptionMode) {
+                    } else if (headerDescription.isNotBlank()) {
                         Text(
                             text = headerDescription,
                             style = MaterialTheme.typography.labelMedium,
@@ -690,7 +873,11 @@ private fun WorkshopTopBarModern(
                             }
                         },
                     singleLine = true,
-                    placeholder = { Text("搜索创意工坊条目") },
+                    placeholder = {
+                        Text(
+                            if (isAccountQueryMode) "搜索当前账号可见条目" else "搜索创意工坊条目",
+                        )
+                    },
                     leadingIcon = {
                         Icon(Icons.Rounded.Search, contentDescription = null)
                     },
@@ -708,11 +895,20 @@ private fun WorkshopTopBarModern(
                     ),
                     shape = RoundedCornerShape(18.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = Color.White.copy(alpha = 0.72f),
-                        unfocusedContainerColor = Color.White.copy(alpha = 0.58f),
-                        disabledContainerColor = Color.White.copy(alpha = 0.48f),
+                        focusedContainerColor = workshopAdaptiveSurfaceColor(
+                            light = Color.White.copy(alpha = 0.72f),
+                            dark = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.92f),
+                        ),
+                        unfocusedContainerColor = workshopAdaptiveSurfaceColor(
+                            light = Color.White.copy(alpha = 0.58f),
+                            dark = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.88f),
+                        ),
+                        disabledContainerColor = workshopAdaptiveSurfaceColor(
+                            light = Color.White.copy(alpha = 0.48f),
+                            dark = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.68f),
+                        ),
                         focusedBorderColor = Color(0xFFE69A69),
-                        unfocusedBorderColor = Color.White.copy(alpha = 0.34f),
+                        unfocusedBorderColor = workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.34f)),
                         focusedLeadingIconColor = Color(0xFFE96D43),
                         unfocusedLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         cursorColor = Color(0xFFE96D43),
@@ -723,19 +919,27 @@ private fun WorkshopTopBarModern(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    QuickFilterChip(
-                        label = currentSectionLabel,
-                        onClick = onOpenSectionPicker,
-                    )
-                    QuickFilterChip(
-                        label = currentSortLabel,
-                        onClick = onOpenSortPicker,
-                    )
-                    if (supportsPeriod) {
+                    if (canOpenAccountQuery || isAccountQueryMode) {
                         QuickFilterChip(
-                            label = currentPeriodLabel,
-                            onClick = onOpenPeriodPicker,
+                            label = launchModeLabel(launchMode),
+                            onClick = onOpenSourcePicker,
                         )
+                    }
+                    if (isBrowseMode) {
+                        QuickFilterChip(
+                            label = currentSectionLabel,
+                            onClick = onOpenSectionPicker,
+                        )
+                        QuickFilterChip(
+                            label = currentSortLabel,
+                            onClick = onOpenSortPicker,
+                        )
+                        if (supportsPeriod) {
+                            QuickFilterChip(
+                                label = currentPeriodLabel,
+                                onClick = onOpenPeriodPicker,
+                            )
+                        }
                     }
                     if (canOpenSubscriptions) {
                         QuickFilterChip(
@@ -743,15 +947,17 @@ private fun WorkshopTopBarModern(
                             onClick = onOpenSubscriptions,
                         )
                     }
-                    QuickFilterChip(
-                        label = if (advancedFilterCount > 0) "高级筛选 $advancedFilterCount" else "高级筛选",
-                        onClick = onOpenFilters,
-                        highlighted = advancedFilterCount > 0,
-                        icon = { Icon(Icons.Rounded.FilterAlt, contentDescription = null) },
-                    )
+                    if (isBrowseMode) {
+                        QuickFilterChip(
+                            label = if (advancedFilterCount > 0) "高级筛选 $advancedFilterCount" else "高级筛选",
+                            onClick = onOpenFilters,
+                            highlighted = advancedFilterCount > 0,
+                            icon = { Icon(Icons.Rounded.FilterAlt, contentDescription = null) },
+                        )
+                    }
                 }
 
-                if (advancedFilterCount > 0 || query.searchText.isNotBlank()) {
+                if (isBrowseMode && (advancedFilterCount > 0 || query.searchText.isNotBlank())) {
                     Row(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -785,7 +991,7 @@ private fun WorkshopTopBarModern(
                     }
                 }
 
-                if (headerDescription.isNotBlank()) {
+                if (isBrowseMode && headerDescription.isNotBlank()) {
                     Text(
                         text = headerDescription,
                         style = MaterialTheme.typography.bodySmall,
@@ -794,9 +1000,10 @@ private fun WorkshopTopBarModern(
                 }
             } else {
                 Surface(
-                    color = Color.White.copy(alpha = 0.62f),
+                    color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.62f)),
                     shape = RoundedCornerShape(18.dp),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+                    border = BorderStroke(1.dp, workshopAdaptiveBorderColor()),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
                 ) {
                     Row(
                         modifier = Modifier
@@ -822,11 +1029,23 @@ private fun WorkshopTopBarModern(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        OutlinedButton(
-                            onClick = onSwitchToBrowse,
-                            shape = RoundedCornerShape(16.dp),
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Text("浏览全部工坊")
+                            if (canOpenAccountQuery) {
+                                OutlinedButton(
+                                    onClick = onOpenAccountQuery,
+                                    shape = RoundedCornerShape(16.dp),
+                                ) {
+                                    Text("账号可见")
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = onSwitchToBrowse,
+                                shape = RoundedCornerShape(16.dp),
+                            ) {
+                                Text("公开工坊")
+                            }
                         }
                     }
                 }
@@ -844,9 +1063,10 @@ private fun CompactActionButton(
     Surface(
         modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
         shape = RoundedCornerShape(14.dp),
-        color = Color.White.copy(alpha = 0.68f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.44f)),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.68f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.44f))),
         shadowElevation = 2.dp,
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Box(
             modifier = Modifier.padding(horizontal = 9.dp, vertical = 8.dp),
@@ -931,9 +1151,10 @@ private fun QuickChoiceSheet(
                 )
             }
             Surface(
-                color = Color.White.copy(alpha = 0.84f),
+                color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.84f)),
                 shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
+                border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.4f))),
+                contentColor = MaterialTheme.colorScheme.onSurface,
             ) {
                 Column(
                     modifier = Modifier.padding(12.dp),
@@ -964,20 +1185,19 @@ private fun WorkshopListItem(
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
-        color = Color.White.copy(alpha = 0.84f),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.84f)),
         shadowElevation = 4.dp,
         tonalElevation = 2.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.44f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.44f))),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(
-                    Brush.horizontalGradient(
-                        listOf(
-                            Color.White.copy(alpha = 0.97f),
-                            Color(0xFFF7EEE4).copy(alpha = 0.92f),
-                        ),
+                    workshopAdaptiveGradientBrush(
+                        lightStart = Color.White.copy(alpha = 0.97f),
+                        lightEnd = Color(0xFFF7EEE4).copy(alpha = 0.92f),
                     ),
                     shape = RoundedCornerShape(22.dp),
                 )
@@ -1080,11 +1300,9 @@ private fun PaginationCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(
-                    Brush.horizontalGradient(
-                        listOf(
-                            Color.White.copy(alpha = 0.96f),
-                            Color(0xFFF6EFE8).copy(alpha = 0.9f),
-                        ),
+                    workshopAdaptiveGradientBrush(
+                        lightStart = Color.White.copy(alpha = 0.96f),
+                        lightEnd = Color(0xFFF6EFE8).copy(alpha = 0.9f),
                     ),
                     shape = RoundedCornerShape(28.dp),
                 )
@@ -1354,8 +1572,9 @@ private fun WorkshopDetailSheet(
 private fun DownloadStatusCard(task: DownloadTaskEntity) {
     Surface(
         shape = RoundedCornerShape(24.dp),
-        color = Color.White.copy(alpha = 0.82f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.82f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor()),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -1455,9 +1674,10 @@ private fun WorkshopOverviewCard(
     autoResolveDownloadInfo: Boolean,
 ) {
     Surface(
-        color = Color.White.copy(alpha = 0.8f),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.8f)),
         shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.4f))),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -1494,9 +1714,10 @@ private fun WorkshopOverviewCard(
 @Composable
 private fun WorkshopTagsCard(tags: List<String>) {
     Surface(
-        color = Color.White.copy(alpha = 0.8f),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.8f)),
         shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.4f))),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -1603,9 +1824,10 @@ private fun FilterSheet(
             }
 
             Surface(
-                color = Color.White.copy(alpha = 0.84f),
+                color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.84f)),
                 shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.44f)),
+                border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.44f))),
+                contentColor = MaterialTheme.colorScheme.onSurface,
             ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
@@ -1823,9 +2045,10 @@ private fun FilterSheet(
             }
 
             Surface(
-                color = Color.White.copy(alpha = 0.82f),
+                color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.82f)),
                 shape = RoundedCornerShape(24.dp),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
+                border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.4f))),
+                contentColor = MaterialTheme.colorScheme.onSurface,
             ) {
                 Column(
                     modifier = Modifier.padding(14.dp),
@@ -2301,6 +2524,14 @@ private fun DownloadTaskEntity.isFinalizingDownload(): Boolean {
     return status == DownloadStatus.Running &&
         totalBytes > 0L &&
         bytesDownloaded >= totalBytes
+}
+
+private fun launchModeLabel(launchMode: WorkshopLaunchMode): String {
+    return when (launchMode) {
+        WorkshopLaunchMode.Browse -> "公开工坊"
+        WorkshopLaunchMode.AccountQuery -> "账号可见"
+        WorkshopLaunchMode.Subscriptions -> "我的订阅"
+    }
 }
 
 private fun WorkshopItem.downloadModeLabel(autoResolveEnabled: Boolean): String {

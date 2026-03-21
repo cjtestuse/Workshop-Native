@@ -76,6 +76,10 @@ import com.slay.workshopnative.ui.feature.login.LoginScreen
 import com.slay.workshopnative.ui.feature.settings.SettingsScreen
 import com.slay.workshopnative.ui.feature.workshop.WorkshopLaunchMode
 import com.slay.workshopnative.ui.feature.workshop.WorkshopScreen
+import com.slay.workshopnative.ui.theme.LocalWorkshopDarkTheme
+import com.slay.workshopnative.ui.theme.workshopAdaptiveBorderColor
+import com.slay.workshopnative.ui.theme.workshopAdaptiveGradientBrush
+import com.slay.workshopnative.ui.theme.workshopAdaptiveSurfaceColor
 import kotlinx.coroutines.flow.collectLatest
 
 private data class RootDestination(
@@ -142,13 +146,13 @@ fun WorkshopNativeRoot(
     val appUpdateState by viewModel.appUpdateState.collectAsStateWithLifecycle()
     val hasAcknowledgedDisclaimer by viewModel.hasAcknowledgedDisclaimer.collectAsStateWithLifecycle()
     val hasAcknowledgedUsageBoundary by viewModel.hasAcknowledgedUsageBoundary.collectAsStateWithLifecycle()
+    val currentRootTabRoute by viewModel.currentRootTabRoute.collectAsStateWithLifecycle()
+    val activeWorkshopAppId by viewModel.activeWorkshopAppId.collectAsStateWithLifecycle()
+    val activeWorkshopAppName by viewModel.activeWorkshopAppName.collectAsStateWithLifecycle()
+    val activeWorkshopMode by viewModel.activeWorkshopMode.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    var appUnlocked by remember { mutableStateOf(false) }
-    var forceLoginScreen by remember { mutableStateOf(false) }
-    var currentRootTabRoute by rememberSaveable { mutableStateOf(RootTab.Explore.route) }
-    var activeWorkshopAppId by rememberSaveable { mutableStateOf<Int?>(null) }
-    var activeWorkshopAppName by rememberSaveable { mutableStateOf("") }
-    var activeWorkshopMode by rememberSaveable { mutableStateOf(WorkshopLaunchMode.Browse.name) }
+    var appUnlocked by rememberSaveable { mutableStateOf(false) }
+    var forceLoginScreen by rememberSaveable { mutableStateOf(false) }
     val openExternalUrl: (String) -> Unit = { url ->
         if (!context.openUrlWithChooser(url, chooserTitle = "选择浏览器")) {
             Toast.makeText(context, "未找到可打开链接的浏览器", Toast.LENGTH_SHORT).show()
@@ -157,8 +161,11 @@ fun WorkshopNativeRoot(
 
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_START) {
-                viewModel.onAppForegrounded()
+            when (event) {
+                Lifecycle.Event.ON_START,
+                Lifecycle.Event.ON_RESUME -> viewModel.onAppForegrounded()
+                Lifecycle.Event.ON_STOP -> viewModel.onAppBackgrounded()
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -179,7 +186,7 @@ fun WorkshopNativeRoot(
                 appUnlocked = true
                 forceLoginScreen = false
                 if (showLibraryTab && currentRootTabRoute == RootTab.Explore.route) {
-                    currentRootTabRoute = RootTab.Library.route
+                    viewModel.navigateRootTab(RootTab.Library.route)
                 }
             }
 
@@ -196,7 +203,7 @@ fun WorkshopNativeRoot(
 
     LaunchedEffect(showLibraryTab) {
         if (!showLibraryTab && currentRootTabRoute == RootTab.Library.route) {
-            currentRootTabRoute = RootTab.Explore.route
+            viewModel.navigateRootTab(RootTab.Explore.route)
         }
     }
 
@@ -258,7 +265,8 @@ fun WorkshopNativeRoot(
                     viewModel.enterGuestMode()
                     forceLoginScreen = false
                     appUnlocked = true
-                    currentRootTabRoute = RootTab.Explore.route
+                    viewModel.closeWorkshop()
+                    viewModel.navigateRootTab(RootTab.Explore.route)
                 },
             )
         }
@@ -299,16 +307,18 @@ fun WorkshopNativeRoot(
     val showSessionBanner = showApplicationShell &&
         isLoginFeatureEnabled &&
         !guestMode &&
-        sessionState.status == SessionStatus.Error
+        (
+            sessionState.status == SessionStatus.Error ||
+                sessionState.isRestoring ||
+                sessionState.status == SessionStatus.Connecting
+        )
     val sessionBannerPadding = when {
         !showSessionBanner -> 0.dp
         else -> 76.dp
     }
 
     BackHandler(enabled = activeWorkshop != null && !imeVisible) {
-        activeWorkshopAppId = null
-        activeWorkshopAppName = ""
-        activeWorkshopMode = WorkshopLaunchMode.Browse.name
+        viewModel.closeWorkshop()
     }
 
     WorkshopBackdrop {
@@ -323,7 +333,7 @@ fun WorkshopNativeRoot(
                 RootBottomBar(
                     destinations = rootDestinations(showLibraryTab),
                     currentRoute = currentRootTab.route,
-                    onNavigate = { route -> currentRootTabRoute = route },
+                    onNavigate = viewModel::navigateRootTab,
                 )
             },
         ) { paddingValues ->
@@ -339,15 +349,11 @@ fun WorkshopNativeRoot(
                         launchMode = activeWorkshop.third,
                         paddingValues = shellPadding,
                         onBack = {
-                            activeWorkshopAppId = null
-                            activeWorkshopAppName = ""
-                            activeWorkshopMode = WorkshopLaunchMode.Browse.name
+                            viewModel.closeWorkshop()
                         },
                         onOpenDownloads = {
-                            currentRootTabRoute = RootTab.Downloads.route
-                            activeWorkshopAppId = null
-                            activeWorkshopAppName = ""
-                            activeWorkshopMode = WorkshopLaunchMode.Browse.name
+                            viewModel.navigateRootTab(RootTab.Downloads.route)
+                            viewModel.closeWorkshop()
                         },
                     )
                 } else {
@@ -356,9 +362,7 @@ fun WorkshopNativeRoot(
                             ExploreScreen(
                                 paddingValues = shellPadding,
                                 onOpenGame = { appId, name ->
-                                    activeWorkshopAppId = appId
-                                    activeWorkshopAppName = name
-                                    activeWorkshopMode = WorkshopLaunchMode.Browse.name
+                                    viewModel.openWorkshop(appId, name, WorkshopLaunchMode.Browse.name)
                                 },
                             )
                         }
@@ -367,7 +371,10 @@ fun WorkshopNativeRoot(
                             if (guestMode || sessionState.status != SessionStatus.Authenticated) {
                                 SignedInContentGate(
                                     paddingValues = shellPadding,
+                                    guestMode = guestMode,
+                                    sessionState = sessionState,
                                     savedAccounts = savedAccounts,
+                                    onRetryRestore = viewModel::retrySessionRestore,
                                     onShowLogin = {
                                         viewModel.leaveGuestMode()
                                         appUnlocked = false
@@ -382,14 +389,10 @@ fun WorkshopNativeRoot(
                                     paddingValues = shellPadding,
                                     accountName = sessionState.account?.accountName.orEmpty(),
                                     onOpenGame = { appId, name ->
-                                        activeWorkshopAppId = appId
-                                        activeWorkshopAppName = name
-                                        activeWorkshopMode = WorkshopLaunchMode.Browse.name
+                                        viewModel.openWorkshop(appId, name, WorkshopLaunchMode.Browse.name)
                                     },
                                     onOpenSubscriptions = { appId, name ->
-                                        activeWorkshopAppId = appId
-                                        activeWorkshopAppName = name
-                                        activeWorkshopMode = WorkshopLaunchMode.Subscriptions.name
+                                        viewModel.openWorkshop(appId, name, WorkshopLaunchMode.Subscriptions.name)
                                     },
                                 )
                             }
@@ -727,10 +730,17 @@ private fun UpdateMetaPill(text: String) {
 @Composable
 private fun SignedInContentGate(
     paddingValues: PaddingValues,
+    guestMode: Boolean,
+    sessionState: SteamSessionState,
     savedAccounts: List<SavedSteamAccount>,
+    onRetryRestore: () -> Unit,
     onShowLogin: () -> Unit,
     onSwitchSavedAccount: (String) -> Unit,
 ) {
+    val isRecovering = !guestMode && (sessionState.isRestoring || sessionState.status == SessionStatus.Connecting)
+    val canRestoreSavedSession = !guestMode &&
+        (savedAccounts.isNotEmpty() || sessionState.account != null) &&
+        sessionState.status == SessionStatus.Error
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -741,31 +751,70 @@ private fun SignedInContentGate(
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(30.dp),
-            color = Color.White.copy(alpha = 0.86f),
+            color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.86f)),
             shadowElevation = 10.dp,
             tonalElevation = 2.dp,
-            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.45f)),
+            border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.45f))),
+            contentColor = MaterialTheme.colorScheme.onSurface,
         ) {
             Column(
                 modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                Text(
-                    text = "我的内容需要 Steam 账号",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                )
-                Text(
-                    text = "公开创意工坊仍然可以在探索页浏览。要查看已购买和家庭共享游戏，请登录 Steam 或切换到已保存账号。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Button(
-                    onClick = onShowLogin,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(18.dp),
-                ) {
-                    Text("前往登录")
+                if (isRecovering) {
+                    CircularProgressIndicator()
+                    Text(
+                        text = "正在恢复 Steam 登录",
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    )
+                    Text(
+                        text = "切回前台后会自动重连 Steam，恢复完成后这里会自动回到我的内容。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedButton(
+                        onClick = onRetryRestore,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                    ) {
+                        Text("立即重试")
+                    }
+                } else {
+                    Text(
+                        text = if (canRestoreSavedSession) {
+                            "Steam 连接已断开"
+                        } else {
+                            "我的内容需要 Steam 账号"
+                        },
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    )
+                    Text(
+                        text = if (canRestoreSavedSession) {
+                            sessionState.errorMessage ?: "可以重试恢复当前账号，或者切换到其他已保存账号。"
+                        } else {
+                            "公开创意工坊仍然可以在探索页浏览。要查看已购买和家庭共享游戏，请登录 Steam 或切换到已保存账号。"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (canRestoreSavedSession) {
+                        Button(
+                            onClick = onRetryRestore,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(18.dp),
+                        ) {
+                            Text("重试恢复")
+                        }
+                    }
+                    Button(
+                        onClick = onShowLogin,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(18.dp),
+                    ) {
+                        Text("前往登录")
+                    }
                 }
                 if (savedAccounts.isNotEmpty()) {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -834,7 +883,7 @@ private fun RootBottomBar(
         shadowElevation = 10.dp,
         color = Color(0xFF192130).copy(alpha = 0.94f),
         shape = RoundedCornerShape(32.dp),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)),
     ) {
         Row(
             modifier = Modifier
@@ -865,17 +914,18 @@ private fun RootBottomBarItem(
     icon: @Composable () -> Unit,
     onClick: () -> Unit,
 ) {
+    val darkTheme = LocalWorkshopDarkTheme.current
     Column(
         modifier = modifier
             .padding(horizontal = 3.dp)
             .clip(RoundedCornerShape(22.dp))
             .background(
                 brush = if (selected) {
-                    Brush.horizontalGradient(
-                        listOf(
-                            Color(0xFFF7E7D8),
-                            Color(0xFFFFF4E8),
-                        ),
+                    workshopAdaptiveGradientBrush(
+                        lightStart = Color(0xFFF7E7D8),
+                        lightEnd = Color(0xFFFFF4E8),
+                        darkStart = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.98f),
+                        darkEnd = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f),
                     )
                 } else {
                     Brush.horizontalGradient(
@@ -895,7 +945,19 @@ private fun RootBottomBarItem(
                 .size(42.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(
-                    if (selected) Color(0x1AE96D43) else Color.White.copy(alpha = 0.06f),
+                    if (selected) {
+                        if (darkTheme) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                        } else {
+                            Color(0x1AE96D43)
+                        }
+                    } else {
+                        if (darkTheme) {
+                            MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.42f)
+                        } else {
+                            Color.White.copy(alpha = 0.06f)
+                        }
+                    },
                 )
                 ,
             contentAlignment = Alignment.Center,
@@ -908,9 +970,13 @@ private fun RootBottomBarItem(
                 .fillMaxWidth()
                 .padding(top = 6.dp),
             color = if (selected) {
-                Color(0xFF172131)
+                if (darkTheme) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    Color(0xFF172131)
+                }
             } else {
-                Color.White.copy(alpha = 0.72f)
+                MaterialTheme.colorScheme.onSurfaceVariant
             },
             style = MaterialTheme.typography.labelSmall,
             maxLines = 1,
@@ -928,8 +994,12 @@ private fun StartupStateOverlay() {
         contentAlignment = Alignment.Center,
     ) {
         Surface(
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            color = workshopAdaptiveSurfaceColor(
+                light = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                dark = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
+            ),
             shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+            contentColor = MaterialTheme.colorScheme.onSurface,
         ) {
             Column(
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
@@ -963,8 +1033,12 @@ private fun SessionStateOverlay(
         contentAlignment = Alignment.Center,
     ) {
         Surface(
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            color = workshopAdaptiveSurfaceColor(
+                light = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+                dark = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
+            ),
             shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
+            contentColor = MaterialTheme.colorScheme.onSurface,
         ) {
             Column(
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
@@ -1028,7 +1102,7 @@ private fun SessionStateBanner(
         shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
         tonalElevation = 0.dp,
         shadowElevation = 8.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.1f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.52f)),
     ) {
         if (isRecovering) {
             Row(
@@ -1042,13 +1116,13 @@ private fun SessionStateBanner(
                         .size(18.dp)
                         .padding(end = 10.dp),
                     strokeWidth = 2.4.dp,
-                    color = Color(0xFFF7E9D8),
+                    color = MaterialTheme.colorScheme.primary,
                 )
                 Text(
                     text = "Steam 正在重连，联网操作恢复后会自动接上。",
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.92f),
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
         } else {
@@ -1059,7 +1133,7 @@ private fun SessionStateBanner(
                 Text(
                     text = sessionState.errorMessage ?: "Steam 连接已断开",
                     style = MaterialTheme.typography.titleSmall,
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -1076,9 +1150,9 @@ private fun SessionStateBanner(
                         onClick = onShowLogin,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(18.dp),
-                        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.18f)),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
                     ) {
-                        Text("登录页", color = Color.White.copy(alpha = 0.9f))
+                        Text("登录页", color = MaterialTheme.colorScheme.onSurface)
                     }
                 }
             }

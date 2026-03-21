@@ -75,6 +75,9 @@ import com.slay.workshopnative.data.local.DownloadTaskEntity
 import com.slay.workshopnative.ui.components.ArtworkThumbnail
 import com.slay.workshopnative.ui.components.WorkshopNativeModalBottomSheet
 import com.slay.workshopnative.ui.components.steamCapsuleUrl
+import com.slay.workshopnative.ui.theme.LocalWorkshopDarkTheme
+import com.slay.workshopnative.ui.theme.workshopAdaptiveBorderColor
+import com.slay.workshopnative.ui.theme.workshopAdaptiveSurfaceColor
 import java.io.File
 import java.net.URI
 import kotlinx.coroutines.Dispatchers
@@ -352,10 +355,11 @@ private fun DownloadGameGroupCard(
 ) {
     Surface(
         shape = RoundedCornerShape(28.dp),
-        color = Color.White.copy(alpha = 0.84f),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.84f)),
         shadowElevation = 6.dp,
         tonalElevation = 2.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor()),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -870,10 +874,11 @@ private fun DownloadsControlPanel(
 ) {
     Surface(
         shape = RoundedCornerShape(28.dp),
-        color = Color.White.copy(alpha = 0.82f),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.82f)),
         shadowElevation = 8.dp,
         tonalElevation = 2.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor()),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
@@ -935,8 +940,10 @@ private fun DownloadsEmptyStateCard(
 ) {
     Card(
         shape = RoundedCornerShape(28.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.86f)),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+        colors = CardDefaults.cardColors(
+            containerColor = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.86f)),
+        ),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor()),
     ) {
         Column(
             modifier = Modifier.padding(18.dp),
@@ -1050,8 +1057,9 @@ private fun ActionPillButton(
     Surface(
         modifier = modifier.clickable(onClick = onClick),
         shape = RoundedCornerShape(18.dp),
-        color = Color.White.copy(alpha = 0.72f),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.72f)),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Row(
             modifier = Modifier.padding(
@@ -1678,36 +1686,102 @@ private data class DownloadCardTone(
     val end: Color,
 )
 
+@Composable
 private fun DownloadTaskEntity.cardTone(): DownloadCardTone {
+    val darkTheme = LocalWorkshopDarkTheme.current
     return when (status) {
         DownloadStatus.Success -> DownloadCardTone(
-            surface = Color(0xFFF7FBF4),
-            border = Color(0xFFD8E7D2),
-            start = Color(0xFFFFFFFF),
-            end = Color(0xFFEAF5E4),
+            surface = if (darkTheme) {
+                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.42f)
+            } else {
+                Color(0xFFF7FBF4)
+            },
+            border = if (darkTheme) {
+                MaterialTheme.colorScheme.secondary.copy(alpha = 0.24f)
+            } else {
+                Color(0xFFD8E7D2)
+            },
+            start = if (darkTheme) {
+                MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.98f)
+            } else {
+                Color(0xFFFFFFFF)
+            },
+            end = if (darkTheme) {
+                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.62f)
+            } else {
+                Color(0xFFEAF5E4)
+            },
         )
         DownloadStatus.Failed,
         DownloadStatus.Cancelled,
         DownloadStatus.Unavailable,
         -> DownloadCardTone(
-            surface = Color(0xFFFFF8F4),
-            border = Color(0xFFF0D7CB),
-            start = Color(0xFFFFFFFF),
-            end = Color(0xFFFBEADF),
+            surface = if (darkTheme) {
+                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.34f)
+            } else {
+                Color(0xFFFFF8F4)
+            },
+            border = if (darkTheme) {
+                MaterialTheme.colorScheme.error.copy(alpha = 0.24f)
+            } else {
+                Color(0xFFF0D7CB)
+            },
+            start = if (darkTheme) {
+                MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.98f)
+            } else {
+                Color(0xFFFFFFFF)
+            },
+            end = if (darkTheme) {
+                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+            } else {
+                Color(0xFFFBEADF)
+            },
         )
         DownloadStatus.Paused -> DownloadCardTone(
-            surface = Color(0xFFFBFAF6),
-            border = Color(0xFFE6E0D4),
-            start = Color(0xFFFFFFFF),
-            end = Color(0xFFF4F0E8),
+            surface = if (darkTheme) {
+                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.34f)
+            } else {
+                Color(0xFFFBFAF6)
+            },
+            border = if (darkTheme) {
+                MaterialTheme.colorScheme.tertiary.copy(alpha = 0.24f)
+            } else {
+                Color(0xFFE6E0D4)
+            },
+            start = if (darkTheme) {
+                MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.98f)
+            } else {
+                Color(0xFFFFFFFF)
+            },
+            end = if (darkTheme) {
+                MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.52f)
+            } else {
+                Color(0xFFF4F0E8)
+            },
         )
         DownloadStatus.Queued,
         DownloadStatus.Running,
         -> DownloadCardTone(
-            surface = Color(0xFFFFFBF7),
-            border = Color.White.copy(alpha = 0.44f),
-            start = Color.White.copy(alpha = 0.95f),
-            end = Color(0xFFF8EFE5).copy(alpha = 0.9f),
+            surface = if (darkTheme) {
+                MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f)
+            } else {
+                Color(0xFFFFFBF7)
+            },
+            border = if (darkTheme) {
+                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)
+            } else {
+                Color.White.copy(alpha = 0.44f)
+            },
+            start = if (darkTheme) {
+                MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.98f)
+            } else {
+                Color.White.copy(alpha = 0.95f)
+            },
+            end = if (darkTheme) {
+                MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.9f)
+            } else {
+                Color(0xFFF8EFE5).copy(alpha = 0.9f)
+            },
         )
     }
 }

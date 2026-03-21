@@ -21,7 +21,9 @@
 
         <activity
             android:name=".MainActivity"
+            android:alwaysRetainTaskState="true"
             android:exported="true"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.WorkshopNative">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

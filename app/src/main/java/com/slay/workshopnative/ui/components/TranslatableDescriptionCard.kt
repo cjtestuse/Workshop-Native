@@ -15,9 +15,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.slay.workshopnative.ui.theme.workshopAdaptiveBorderColor
+import com.slay.workshopnative.ui.theme.workshopAdaptiveSurfaceColor
 
 @Composable
 fun TranslatableDescriptionCard(
@@ -43,9 +44,12 @@ fun TranslatableDescriptionCard(
 
     Surface(
         modifier = modifier.fillMaxWidth(),
-        color = Color.White.copy(alpha = 0.8f),
+        color = workshopAdaptiveSurfaceColor(
+            light = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.8f),
+        ),
         shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor()),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier.padding(16.dp),

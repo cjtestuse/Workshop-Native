@@ -8,16 +8,23 @@ import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.model.WorkshopGameEntry
 import com.slay.workshopnative.data.model.WorkshopGamePage
 import com.slay.workshopnative.data.model.WorkshopItem
+import com.slay.workshopnative.core.logging.SupportSessionRuntimeSnapshot
 import kotlinx.coroutines.flow.StateFlow
 
 interface SteamRepository {
     val sessionState: StateFlow<SteamSessionState>
+
+    fun isAuthenticatedDownloadReady(): Boolean
 
     suspend fun bootstrap()
 
     fun retryRestore()
 
     fun onAppForegrounded()
+
+    fun onAppBackgrounded()
+
+    fun sessionRuntimeSnapshot(): SupportSessionRuntimeSnapshot
 
     fun login(username: String, password: String, rememberSession: Boolean)
 
@@ -42,6 +49,12 @@ interface SteamRepository {
     suspend fun searchWorkshopGames(query: String): Result<List<WorkshopGameEntry>>
 
     suspend fun loadWorkshopBrowsePage(
+        appId: Int,
+        query: WorkshopBrowseQuery,
+        forceRefresh: Boolean = false,
+    ): Result<WorkshopBrowsePage>
+
+    suspend fun loadAuthenticatedWorkshopQueryPage(
         appId: Int,
         query: WorkshopBrowseQuery,
         forceRefresh: Boolean = false,

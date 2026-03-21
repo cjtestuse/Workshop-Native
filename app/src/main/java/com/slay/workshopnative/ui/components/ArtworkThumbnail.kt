@@ -26,6 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
+import com.slay.workshopnative.ui.theme.workshopAdaptiveBorderColor
 
 @Composable
 fun ArtworkThumbnail(
@@ -59,7 +60,7 @@ fun ArtworkThumbnail(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 2.dp,
         shadowElevation = 8.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.35f))),
     ) {
         Box(
             modifier = Modifier

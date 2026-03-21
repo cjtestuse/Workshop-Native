@@ -65,6 +65,10 @@ import com.slay.workshopnative.ui.components.ArtworkThumbnail
 import com.slay.workshopnative.ui.components.TranslatableDescriptionCard
 import com.slay.workshopnative.ui.components.WorkshopNativeModalBottomSheet
 import com.slay.workshopnative.ui.components.steamCapsuleUrl
+import com.slay.workshopnative.ui.theme.workshopAdaptiveBorderColor
+import com.slay.workshopnative.ui.theme.workshopAdaptiveGradientBrush
+import com.slay.workshopnative.ui.theme.workshopAdaptiveOverlayColor
+import com.slay.workshopnative.ui.theme.workshopAdaptiveSurfaceColor
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -299,10 +303,11 @@ private fun ExploreControlPanel(
 ) {
     Surface(
         shape = RoundedCornerShape(28.dp),
-        color = Color.White.copy(alpha = 0.8f),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.8f)),
         shadowElevation = 8.dp,
         tonalElevation = 2.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.42f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor()),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp),
@@ -433,11 +438,9 @@ private fun ExploreGameRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(
-                    brush = Brush.horizontalGradient(
-                        listOf(
-                            Color.White.copy(alpha = 0.98f),
-                            Color(0xFFF9F0E5).copy(alpha = 0.94f),
-                        ),
+                    brush = workshopAdaptiveGradientBrush(
+                        lightStart = Color.White.copy(alpha = 0.98f),
+                        lightEnd = Color(0xFFF9F0E5).copy(alpha = 0.94f),
                     ),
                     shape = RoundedCornerShape(22.dp),
                 )
@@ -567,7 +570,7 @@ private fun ExploreGameDetailsSheet(
             ) {
                 ExploreMetaChip(
                     label = if (details != null) "游戏详情" else "基础信息",
-                    containerColor = Color.White.copy(alpha = 0.18f),
+                    containerColor = workshopAdaptiveOverlayColor(),
                     contentColor = Color.White,
                 )
                 Text(
@@ -637,9 +640,10 @@ private fun ExploreGameDetailsSheet(
 
             else -> {
                 Surface(
-                    color = Color.White.copy(alpha = 0.78f),
+                    color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.78f)),
                     shape = RoundedCornerShape(24.dp),
-                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
+                    border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.4f))),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
                 ) {
                     Text(
                         text = "暂时没有读取到这款游戏的详细介绍，但你仍然可以直接进入创意工坊。",
@@ -828,9 +832,10 @@ private fun ExploreOverviewCard(
     genres: List<String>,
 ) {
     Surface(
-        color = Color.White.copy(alpha = 0.78f),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.78f)),
         shape = RoundedCornerShape(24.dp),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.4f))),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier.padding(16.dp),

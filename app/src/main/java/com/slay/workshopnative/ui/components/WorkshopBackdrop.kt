@@ -13,22 +13,32 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
+import com.slay.workshopnative.ui.theme.LocalWorkshopDarkTheme
 
 @Composable
 fun WorkshopBackdrop(
     content: @Composable () -> Unit,
 ) {
     val base = MaterialTheme.colorScheme.background
+    val isDarkTheme = LocalWorkshopDarkTheme.current
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 brush = Brush.linearGradient(
-                    listOf(
-                        Color(0xFFF7F1EA),
-                        base,
-                        MaterialTheme.colorScheme.surfaceContainerLowest,
-                    ),
+                    if (isDarkTheme) {
+                        listOf(
+                            MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.96f),
+                            base,
+                            MaterialTheme.colorScheme.surfaceContainerLowest,
+                        )
+                    } else {
+                        listOf(
+                            Color(0xFFF7F1EA),
+                            base,
+                            MaterialTheme.colorScheme.surfaceContainerLowest,
+                        )
+                    },
                 ),
             ),
     ) {
@@ -41,7 +51,7 @@ fun WorkshopBackdrop(
                     Brush.verticalGradient(
                         listOf(
                             Color(0x36E96D43),
-                            Color(0x12E96D43),
+                            if (isDarkTheme) Color(0x08E96D43) else Color(0x12E96D43),
                         ),
                     ),
                 )
@@ -55,8 +65,8 @@ fun WorkshopBackdrop(
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            Color(0x2000B8A9),
-                            Color(0x1200B8A9),
+                            if (isDarkTheme) Color(0x1800B8A9) else Color(0x2000B8A9),
+                            if (isDarkTheme) Color(0x0800B8A9) else Color(0x1200B8A9),
                         ),
                     ),
                 )
@@ -69,10 +79,17 @@ fun WorkshopBackdrop(
                 .clip(RoundedCornerShape(40.dp))
                 .background(
                     Brush.linearGradient(
-                        listOf(
-                            Color(0x18FFFFFF),
-                            Color(0x00FFFFFF),
-                        ),
+                        if (isDarkTheme) {
+                            listOf(
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
+                                Color.Transparent,
+                            )
+                        } else {
+                            listOf(
+                                Color(0x18FFFFFF),
+                                Color(0x00FFFFFF),
+                            )
+                        },
                     ),
                 )
                 .fillMaxSize(0.22f),
@@ -81,7 +98,13 @@ fun WorkshopBackdrop(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .clip(RoundedCornerShape(bottomStart = 40.dp, bottomEnd = 40.dp))
-                .background(Color.White.copy(alpha = 0.14f))
+                .background(
+                    if (isDarkTheme) {
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
+                    } else {
+                        Color.White.copy(alpha = 0.14f)
+                    },
+                )
                 .fillMaxSize(0.06f),
         )
         content()

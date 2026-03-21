@@ -51,6 +51,7 @@ data class WorkshopUiState(
     val isLoginFeatureEnabled: Boolean = false,
     val isLoggedInDownloadEnabled: Boolean = false,
     val isSubscriptionDisplayEnabled: Boolean = false,
+    val canOpenAccountQuery: Boolean = false,
     val canOpenSubscriptions: Boolean = false,
     val showSubscriptionState: Boolean = false,
     val downloadIdentityLabel: String = "匿名下载",
@@ -107,7 +108,7 @@ class WorkshopViewModel @Inject constructor(
         val decodedAppName = Uri.decode(appName)
         val effectiveLaunchMode = requestedLaunchMode(launchMode)
         val blockedMessage = if (effectiveLaunchMode != launchMode) {
-            subscriptionsUnavailableMessage()
+            launchModeUnavailableMessage(launchMode)
         } else {
             noticeMessage
         }
@@ -130,6 +131,16 @@ class WorkshopViewModel @Inject constructor(
 
         metadataRequestsInFlight.clear()
         resolvedItemsCache.clear()
+        val preservedSearchText = if (
+            currentState.appId == appId &&
+            currentState.appName == decodedAppName &&
+            currentState.launchMode != WorkshopLaunchMode.Subscriptions &&
+            effectiveLaunchMode != WorkshopLaunchMode.Subscriptions
+        ) {
+            currentState.query.searchText.trim()
+        } else {
+            ""
+        }
         _uiState.update {
             it.copy(
                 appId = appId,
@@ -146,6 +157,7 @@ class WorkshopViewModel @Inject constructor(
                     } else {
                         WorkshopBrowseQuery.SECTION_ITEMS
                     },
+                    searchText = preservedSearchText,
                     pageSize = workshopPageSize,
                 ),
                 totalCount = 0,
@@ -168,6 +180,7 @@ class WorkshopViewModel @Inject constructor(
                 isLoginFeatureEnabled = isLoginFeatureEnabled,
                 isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
                 isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
+                canOpenAccountQuery = canUseAccountQuery(),
                 canOpenSubscriptions = canUseSubscriptionFeatures(),
                 showSubscriptionState = shouldShowSubscriptionState(effectiveLaunchMode),
                 selectedItem = null,
@@ -197,6 +210,16 @@ class WorkshopViewModel @Inject constructor(
             appId = state.appId,
             appName = state.appName,
             launchMode = WorkshopLaunchMode.Browse,
+        )
+    }
+
+    fun openAccountQueryMode() {
+        val state = _uiState.value
+        if (state.appId <= 0 || state.launchMode == WorkshopLaunchMode.AccountQuery) return
+        bindApp(
+            appId = state.appId,
+            appName = state.appName,
+            launchMode = WorkshopLaunchMode.AccountQuery,
         )
     }
 
@@ -478,6 +501,27 @@ class WorkshopViewModel @Inject constructor(
         if (appId <= 0) return
 
         val request = state.query.copy(page = targetPage)
+        if (state.launchMode == WorkshopLaunchMode.AccountQuery && request.searchText.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    isRefreshing = false,
+                    isLoadingMore = false,
+                    hasLoadedOnce = true,
+                    items = emptyList(),
+                    query = request,
+                    totalCount = 0,
+                    hasMore = false,
+                    sectionOptions = emptyList(),
+                    sortOptions = emptyList(),
+                    periodOptions = emptyList(),
+                    tagGroups = emptyList(),
+                    supportsIncompatibleFilter = false,
+                    errorMessage = null,
+                    actionMessage = null,
+                )
+            }
+            return
+        }
 
         viewModelScope.launch {
             _uiState.update {
@@ -492,6 +536,8 @@ class WorkshopViewModel @Inject constructor(
             val pageResult = when (state.launchMode) {
                 WorkshopLaunchMode.Browse ->
                     steamRepository.loadWorkshopBrowsePage(appId, request, forceRefresh)
+                WorkshopLaunchMode.AccountQuery ->
+                    steamRepository.loadAuthenticatedWorkshopQueryPage(appId, request, forceRefresh)
                 WorkshopLaunchMode.Subscriptions ->
                     steamRepository.loadSubscribedWorkshopPage(
                         appId = appId,
@@ -565,24 +611,27 @@ class WorkshopViewModel @Inject constructor(
                 val autoResolveChanged = autoResolveDownloadInfo != nextAutoResolve
                 val subscriptionModeBlocked = current.launchMode == WorkshopLaunchMode.Subscriptions &&
                     !canUseSubscriptionFeatures()
+                val accountQueryModeBlocked = current.launchMode == WorkshopLaunchMode.AccountQuery &&
+                    !canUseAccountQuery()
                 if (!pageSizeChanged && !autoResolveChanged) {
                     _uiState.update {
                         it.copy(
                             isLoginFeatureEnabled = isLoginFeatureEnabled,
                             isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
                             isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
+                            canOpenAccountQuery = canUseAccountQuery(),
                             canOpenSubscriptions = canUseSubscriptionFeatures(),
                             showSubscriptionState = shouldShowSubscriptionState(it.launchMode),
                             downloadIdentityLabel = downloadIdentityLabel(),
                             downloadIdentityDescription = downloadIdentityDescription(),
                         )
                     }
-                    if (subscriptionModeBlocked && current.appId > 0) {
+                    if ((subscriptionModeBlocked || accountQueryModeBlocked) && current.appId > 0) {
                         bindApp(
                             appId = current.appId,
                             appName = current.appName,
                             launchMode = WorkshopLaunchMode.Browse,
-                            noticeMessage = subscriptionsUnavailableMessage(),
+                            noticeMessage = launchModeUnavailableMessage(current.launchMode),
                         )
                     }
                     return@collectLatest
@@ -602,6 +651,7 @@ class WorkshopViewModel @Inject constructor(
                         isLoginFeatureEnabled = isLoginFeatureEnabled,
                         isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
                         isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
+                        canOpenAccountQuery = canUseAccountQuery(),
                         canOpenSubscriptions = canUseSubscriptionFeatures(),
                         showSubscriptionState = shouldShowSubscriptionState(state.launchMode),
                         downloadIdentityLabel = downloadIdentityLabel(),
@@ -609,12 +659,12 @@ class WorkshopViewModel @Inject constructor(
                     )
                 }
 
-                if (subscriptionModeBlocked && current.appId > 0) {
+                if ((subscriptionModeBlocked || accountQueryModeBlocked) && current.appId > 0) {
                     bindApp(
                         appId = current.appId,
                         appName = current.appName,
                         launchMode = WorkshopLaunchMode.Browse,
-                        noticeMessage = subscriptionsUnavailableMessage(),
+                        noticeMessage = launchModeUnavailableMessage(current.launchMode),
                     )
                     return@collectLatest
                 }
@@ -657,6 +707,7 @@ class WorkshopViewModel @Inject constructor(
                 currentAccountName = session.account?.accountName.orEmpty()
                 _uiState.update {
                     it.copy(
+                        canOpenAccountQuery = canUseAccountQuery(),
                         canOpenSubscriptions = canUseSubscriptionFeatures(),
                         showSubscriptionState = shouldShowSubscriptionState(it.launchMode),
                         downloadIdentityLabel = downloadIdentityLabel(),
@@ -666,14 +717,16 @@ class WorkshopViewModel @Inject constructor(
                 val currentState = _uiState.value
                 if (
                     currentState.appId > 0 &&
-                    currentState.launchMode == WorkshopLaunchMode.Subscriptions &&
-                    !canUseSubscriptionFeatures()
+                    (
+                        currentState.launchMode == WorkshopLaunchMode.Subscriptions && !canUseSubscriptionFeatures()
+                        || currentState.launchMode == WorkshopLaunchMode.AccountQuery && !canUseAccountQuery()
+                    )
                 ) {
                     bindApp(
                         appId = currentState.appId,
                         appName = currentState.appName,
                         launchMode = WorkshopLaunchMode.Browse,
-                        noticeMessage = subscriptionsUnavailableMessage(),
+                        noticeMessage = launchModeUnavailableMessage(currentState.launchMode),
                     )
                     return@collectLatest
                 }
@@ -826,11 +879,17 @@ class WorkshopViewModel @Inject constructor(
     }
 
     private fun requestedLaunchMode(launchMode: WorkshopLaunchMode): WorkshopLaunchMode {
-        return if (launchMode == WorkshopLaunchMode.Subscriptions && !canUseSubscriptionFeatures()) {
-            WorkshopLaunchMode.Browse
-        } else {
-            launchMode
+        return when {
+            launchMode == WorkshopLaunchMode.Subscriptions && !canUseSubscriptionFeatures() ->
+                WorkshopLaunchMode.Browse
+            launchMode == WorkshopLaunchMode.AccountQuery && !canUseAccountQuery() ->
+                WorkshopLaunchMode.Browse
+            else -> launchMode
         }
+    }
+
+    private fun canUseAccountQuery(): Boolean {
+        return isLoginFeatureEnabled && currentSessionStatus == SessionStatus.Authenticated
     }
 
     private fun canUseSubscriptionFeatures(): Boolean {
@@ -849,6 +908,22 @@ class WorkshopViewModel @Inject constructor(
             !isSubscriptionDisplayEnabled -> "已在设置中关闭“用户已订阅展示”，当前改为浏览全部工坊。"
             currentSessionStatus != SessionStatus.Authenticated -> "当前未登录，无法读取我的订阅。"
             else -> "当前无法读取我的订阅。"
+        }
+    }
+
+    private fun accountQueryUnavailableMessage(): String {
+        return when {
+            !isLoginFeatureEnabled -> "已在设置中关闭登录功能，当前无法使用账号可见查询。"
+            currentSessionStatus != SessionStatus.Authenticated -> "当前未登录，无法使用账号可见查询。"
+            else -> "当前无法使用账号可见查询。"
+        }
+    }
+
+    private fun launchModeUnavailableMessage(launchMode: WorkshopLaunchMode): String {
+        return when (launchMode) {
+            WorkshopLaunchMode.Browse -> "当前无法读取创意工坊。"
+            WorkshopLaunchMode.AccountQuery -> accountQueryUnavailableMessage()
+            WorkshopLaunchMode.Subscriptions -> subscriptionsUnavailableMessage()
         }
     }
 }

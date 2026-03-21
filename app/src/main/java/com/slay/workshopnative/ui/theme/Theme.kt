@@ -5,6 +5,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import com.slay.workshopnative.data.preferences.AppThemeMode
+import com.slay.workshopnative.data.preferences.DEFAULT_APP_THEME_MODE
 
 private val LightScheme = lightColorScheme(
     primary = Copper500,
@@ -49,21 +52,28 @@ private val DarkScheme = darkColorScheme(
     surface = Slate900,
     onSurface = Slate100,
     surfaceVariant = androidx.compose.ui.graphics.Color(0xFF283142),
-    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFFB6C0D1),
+    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFFD0D7E4),
     surfaceContainerHigh = Slate800,
     surfaceContainerLowest = Slate950,
     outline = androidx.compose.ui.graphics.Color(0xFF4A5568),
-    outlineVariant = androidx.compose.ui.graphics.Color(0xFF303A4D),
+    outlineVariant = androidx.compose.ui.graphics.Color(0xFF42506A),
 )
 
 @Composable
 fun WorkshopNativeTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    themeMode: AppThemeMode = DEFAULT_APP_THEME_MODE,
     content: @Composable () -> Unit,
 ) {
-    MaterialTheme(
-        colorScheme = if (darkTheme) DarkScheme else LightScheme,
-        typography = WorkshopTypography,
-        content = content,
-    )
+    val darkTheme = when (themeMode) {
+        AppThemeMode.System -> isSystemInDarkTheme()
+        AppThemeMode.Light -> false
+        AppThemeMode.Dark -> true
+    }
+    CompositionLocalProvider(LocalWorkshopDarkTheme provides darkTheme) {
+        MaterialTheme(
+            colorScheme = if (darkTheme) DarkScheme else LightScheme,
+            typography = WorkshopTypography,
+            content = content,
+        )
+    }
 }

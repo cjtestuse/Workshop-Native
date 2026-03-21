@@ -67,6 +67,8 @@ import com.slay.workshopnative.data.model.SessionStatus
 import com.slay.workshopnative.data.model.SteamSessionState
 import com.slay.workshopnative.data.preferences.SavedSteamAccount
 import com.slay.workshopnative.ui.components.WorkshopBackdrop
+import com.slay.workshopnative.ui.theme.workshopAdaptiveBorderColor
+import com.slay.workshopnative.ui.theme.workshopAdaptiveSurfaceColor
 
 @Composable
 fun LoginScreen(
@@ -124,13 +126,19 @@ fun LoginScreen(
                         .fillMaxWidth()
                         .padding(top = 50.dp),
                     shape = RoundedCornerShape(36.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                    color = workshopAdaptiveSurfaceColor(
+                        light = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                        dark = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
+                    ),
                     tonalElevation = 8.dp,
                     shadowElevation = 18.dp,
                     border = BorderStroke(
                         1.dp,
-                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.34f),
+                        workshopAdaptiveBorderColor(
+                            light = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.34f),
+                        ),
                     ),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
                 ) {
                     Column(
                         modifier = Modifier
@@ -342,13 +350,19 @@ fun LoginScreen(
                 Surface(
                     modifier = Modifier.align(Alignment.Center),
                     shape = RoundedCornerShape(26.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                    color = workshopAdaptiveSurfaceColor(
+                        light = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                        dark = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.96f),
+                    ),
                     tonalElevation = 8.dp,
                     shadowElevation = 14.dp,
                     border = BorderStroke(
                         1.dp,
-                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f),
+                        workshopAdaptiveBorderColor(
+                            light = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.28f),
+                        ),
                     ),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
                 ) {
                     Column(
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp),
@@ -377,7 +391,7 @@ private fun BrandMark(
         shape = RoundedCornerShape(30.dp),
         shadowElevation = 18.dp,
         tonalElevation = 8.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.36f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.36f))),
     ) {
         Box(
             modifier = Modifier
@@ -449,12 +463,25 @@ private fun CredentialField(
         keyboardActions = keyboardActions,
         shape = RoundedCornerShape(22.dp),
         colors = OutlinedTextFieldDefaults.colors(
-            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
-            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
-            disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.72f),
+            unfocusedContainerColor = workshopAdaptiveSurfaceColor(
+                light = MaterialTheme.colorScheme.surfaceContainerLowest,
+                dark = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f),
+            ),
+            focusedContainerColor = workshopAdaptiveSurfaceColor(
+                light = MaterialTheme.colorScheme.surfaceContainerLowest,
+                dark = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.94f),
+            ),
+            disabledContainerColor = workshopAdaptiveSurfaceColor(
+                light = MaterialTheme.colorScheme.surfaceContainerLowest.copy(alpha = 0.72f),
+                dark = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.7f),
+            ),
             focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
-            unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
-            disabledBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+            unfocusedBorderColor = workshopAdaptiveBorderColor(
+                light = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+            ),
+            disabledBorderColor = workshopAdaptiveBorderColor(
+                light = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+            ),
             focusedLeadingIconColor = MaterialTheme.colorScheme.primary,
             unfocusedLeadingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
             focusedTrailingIconColor = MaterialTheme.colorScheme.primary,

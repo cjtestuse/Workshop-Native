@@ -1,6 +1,9 @@
 package com.slay.workshopnative.data.remote
 
 import android.app.ActivityManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.content.Context
 import android.net.Uri
 import android.os.Build
@@ -13,6 +16,7 @@ import com.slay.workshopnative.core.logging.AppLog as Log
 import com.slay.workshopnative.core.logging.SupportDiagnosticsStore
 import com.slay.workshopnative.core.logging.SupportDownloadDecisionSnapshot
 import com.slay.workshopnative.core.logging.SupportPerformanceSnapshot
+import com.slay.workshopnative.core.logging.SupportSessionRuntimeSnapshot
 import com.slay.workshopnative.core.storage.createMediaStoreFileOutput
 import com.slay.workshopnative.core.storage.createMediaStoreFileUri
 import com.slay.workshopnative.core.storage.copyLocalFileToUri
@@ -59,8 +63,10 @@ import `in`.dragonbra.javasteam.enums.EAccountType
 import `in`.dragonbra.javasteam.enums.EDepotFileFlag
 import `in`.dragonbra.javasteam.enums.ELicenseFlags
 import `in`.dragonbra.javasteam.enums.ELicenseType
+import `in`.dragonbra.javasteam.enums.EPublishedFileQueryType
 import `in`.dragonbra.javasteam.enums.EResult
 import `in`.dragonbra.javasteam.enums.EOSType
+import `in`.dragonbra.javasteam.enums.EWorkshopFileType
 import `in`.dragonbra.javasteam.networking.steam3.ProtocolTypes
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesPlayerSteamclient
 import `in`.dragonbra.javasteam.protobufs.steamclient.SteammessagesPublishedfileSteamclient
@@ -133,7 +139,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
@@ -171,6 +179,7 @@ class SteamSessionManager @Inject constructor(
         private const val WORKSHOP_DEPOT_ID_CACHE_MS = 24 * 60 * 60 * 1000L
         private const val WORKSHOP_BROWSE_CACHE_MS = 45_000L
         private const val WORKSHOP_SUBSCRIPTIONS_CACHE_MS = 45_000L
+        private const val WORKSHOP_AUTHENTICATED_QUERY_CACHE_MS = 45_000L
         private const val WORKSHOP_ITEM_CACHE_MS = 10 * 60 * 1000L
         private const val WORKSHOP_CONTENT_ACCESS_CACHE_MS = 5 * 60 * 1000L
         private const val WORKSHOP_GAME_DISCOVERY_CACHE_MS = 45_000L
@@ -178,6 +187,13 @@ class SteamSessionManager @Inject constructor(
         private const val ANONYMOUS_CONTENT_SESSION_IDLE_MS = 60 * 60 * 1000L
         private const val ANONYMOUS_PREWARM_COOLDOWN_MS = 10 * 60 * 1000L
         private const val INTERACTIVE_LOGIN_RECOVERY_ATTEMPTS = 3
+        private const val FOREGROUND_RECOVERY_DEBOUNCE_MS = 1_500L
+        private const val DOWNLOAD_AUTH_RESTORE_TIMEOUT_MS = 30_000L
+        private const val DOWNLOAD_WORKSHOP_DEPOT_LOOKUP_TIMEOUT_MS = 12_000L
+        private const val DOWNLOAD_ANONYMOUS_CONTENT_ACCESS_TIMEOUT_MS = 18_000L
+        private const val DOWNLOAD_DEPOT_KEY_TIMEOUT_MS = 12_000L
+        private const val DOWNLOAD_CDN_SERVER_LIST_TIMEOUT_MS = 12_000L
+        private const val DOWNLOAD_MANIFEST_REQUEST_CODE_TIMEOUT_MS = 12_000L
         private const val CDN_SERVER_CANDIDATE_LIMIT = 40
         private const val MAX_CDN_ROUTES_PER_TRANSPORT = 4
         private const val MAX_ACTIVE_CDN_ROUTES = 4
@@ -470,6 +486,7 @@ class SteamSessionManager @Inject constructor(
     private var ownedGamesCache: CachedValue<List<OwnedGame>>? = null
     private val workshopDepotIdCache = ConcurrentHashMap<Int, CachedValue<Int>>()
     private val workshopBrowsePageCache = ConcurrentHashMap<String, CachedValue<WorkshopBrowsePage>>()
+    private val workshopAuthenticatedQueryPageCache = ConcurrentHashMap<String, CachedValue<WorkshopBrowsePage>>()
     private val workshopSubscriptionsPageCache = ConcurrentHashMap<String, CachedValue<WorkshopBrowsePage>>()
     private val workshopGamePageCache = ConcurrentHashMap<Int, CachedValue<WorkshopGamePage>>()
     private val workshopGameSearchCache = ConcurrentHashMap<String, CachedValue<List<WorkshopGameEntry>>>()
@@ -485,9 +502,64 @@ class SteamSessionManager @Inject constructor(
     private var anonymousContentSession: AnonymousContentSession? = null
     private var anonymousPrewarmInFlight = false
     private var lastAnonymousPrewarmAtMs = 0L
+    private var appInForeground = true
+    private var pendingForegroundRecovery = false
+    private var lastForegroundRecoveryAtMs = 0L
+    private var lastAppForegroundAtMs: Long? = System.currentTimeMillis()
+    private var lastAppBackgroundAtMs: Long? = null
+    private var lastConnectedAtMs: Long? = null
+    private var lastDisconnectedAtMs: Long? = null
+    private var networkAvailable: Boolean? = null
+    private var networkValidated: Boolean? = null
+    private var lastNetworkAvailableAtMs: Long? = null
+    private var lastNetworkLostAtMs: Long? = null
+    private var lastNetworkChangedAtMs: Long? = null
+    private var lastObservedNetworkTransport: String? = null
+    private var lastDisconnectCategory: String? = null
+    private var lastDisconnectDetail: String? = null
+    private var lastDisconnectUserInitiated: Boolean? = null
+    private var lastDisconnectWhileForeground: Boolean? = null
+    private var connectivityMonitoringRegistered = false
 
     private val _sessionState = MutableStateFlow(SteamSessionState())
     val sessionState: StateFlow<SteamSessionState> = _sessionState.asStateFlow()
+
+    fun isAuthenticatedDownloadReady(): Boolean = hasUsableAuthenticatedDownloadSession()
+
+    private val connectivityManager: ConnectivityManager? by lazy {
+        appContext.getSystemService(ConnectivityManager::class.java)
+    }
+
+    private val connectivityCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            updateObservedNetworkState(
+                available = true,
+                capabilities = connectivityManager?.getNetworkCapabilities(network),
+                action = "network_available",
+            )
+        }
+
+        override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+            updateObservedNetworkState(
+                available = true,
+                capabilities = networkCapabilities,
+                action = "network_capabilities_changed",
+            )
+        }
+
+        override fun onLost(network: Network) {
+            updateObservedNetworkState(
+                available = false,
+                capabilities = null,
+                action = "network_lost",
+            )
+        }
+    }
+
+    init {
+        registerConnectivityMonitoring()
+        refreshObservedNetworkState()
+    }
 
     private val primaryConnectionProfiles = listOf(
         ConnectionProfile(
@@ -646,29 +718,214 @@ class SteamSessionManager @Inject constructor(
     }
 
     fun onAppForegrounded() {
+        appInForeground = true
+        lastAppForegroundAtMs = System.currentTimeMillis()
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = "app_foregrounded",
+            fields = recoveryContextFields(),
+        )
         appScope.launch {
             if (interactiveLoginJob?.isActive == true) return@launch
             if (bootstrapJob?.isActive == true) return@launch
             if (recoveryJob?.isActive == true) return@launch
 
             val currentState = _sessionState.value
-            if (currentState.status != SessionStatus.Authenticated) return@launch
-            if (steamClient != null && isConnected) return@launch
 
             val prefs = preferencesStore.snapshot()
             preferredConnectionProfileLabel = prefs.lastConnectionProfileLabel
             lastSuccessfulCdnHost = prefs.lastCdnHost
             lastSuccessfulCdnTransportDirect = prefs.lastCdnTransportDirect
             if (!prefs.isLoginFeatureEnabled) return@launch
-            if (!prefs.rememberSession || prefs.refreshToken.isBlank() || prefs.accountName.isBlank()) {
+            if (!hasRecoverableAuthenticatedCredentials(prefs)) {
                 return@launch
             }
+            if (hasUsableAuthenticatedDownloadSession()) {
+                pendingForegroundRecovery = false
+                return@launch
+            }
+            val canResumeSavedSession =
+                pendingForegroundRecovery ||
+                    currentState.isRestoring ||
+                    currentState.status == SessionStatus.Authenticated ||
+                    currentState.status == SessionStatus.Connecting ||
+                    currentState.status == SessionStatus.Error
+            if (!canResumeSavedSession) return@launch
+
+            val now = System.currentTimeMillis()
+            if (!pendingForegroundRecovery && now - lastForegroundRecoveryAtMs < FOREGROUND_RECOVERY_DEBOUNCE_MS) {
+                return@launch
+            }
+            lastForegroundRecoveryAtMs = now
+            pendingForegroundRecovery = false
 
             Log.i(
                 LOG_TAG,
-                "onAppForegrounded reconnect clientMissing=${steamClient == null} connected=$isConnected",
+                "onAppForegrounded reconnect clientMissing=${steamClient == null} connected=$isConnected status=${currentState.status} restoring=${currentState.isRestoring}",
             )
             scheduleSessionRecovery("应用回到前台，正在恢复 Steam 连接")
+        }
+    }
+
+    fun onAppBackgrounded() {
+        appInForeground = false
+        lastAppBackgroundAtMs = System.currentTimeMillis()
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = "app_backgrounded",
+            fields = recoveryContextFields(),
+        )
+    }
+
+    fun sessionRuntimeSnapshot(): SupportSessionRuntimeSnapshot {
+        return SupportSessionRuntimeSnapshot(
+            appInForeground = appInForeground,
+            pendingForegroundRecovery = pendingForegroundRecovery,
+            sessionConnected = isConnected,
+            sessionClientReady = steamClient != null,
+            hasSteamApps = steamApps != null,
+            hasSteamContent = steamContent != null,
+            recoveryInProgress = recoveryJob?.isActive == true,
+            bootstrapInProgress = bootstrapJob?.isActive == true,
+            interactiveLoginInProgress = interactiveLoginJob?.isActive == true,
+            networkAvailable = networkAvailable,
+            networkValidated = networkValidated,
+            networkTransport = lastObservedNetworkTransport,
+            lastAppForegroundAtMs = lastAppForegroundAtMs,
+            lastAppBackgroundAtMs = lastAppBackgroundAtMs,
+            lastConnectedAtMs = lastConnectedAtMs,
+            lastDisconnectedAtMs = lastDisconnectedAtMs,
+            lastNetworkAvailableAtMs = lastNetworkAvailableAtMs,
+            lastNetworkLostAtMs = lastNetworkLostAtMs,
+            lastNetworkChangedAtMs = lastNetworkChangedAtMs,
+            lastDisconnectCategory = lastDisconnectCategory,
+            lastDisconnectDetail = lastDisconnectDetail,
+            lastDisconnectUserInitiated = lastDisconnectUserInitiated,
+            lastDisconnectWhileForeground = lastDisconnectWhileForeground,
+        )
+    }
+
+    private fun registerConnectivityMonitoring() {
+        val manager = connectivityManager ?: return
+        if (connectivityMonitoringRegistered) return
+        runCatching {
+            manager.registerDefaultNetworkCallback(connectivityCallback)
+            connectivityMonitoringRegistered = true
+        }.onFailure { throwable ->
+            Log.w(LOG_TAG, "registerConnectivityMonitoring failed", throwable)
+        }
+    }
+
+    private fun refreshObservedNetworkState() {
+        val manager = connectivityManager ?: return
+        val network = manager.activeNetwork
+        if (network == null) {
+            updateObservedNetworkState(
+                available = false,
+                capabilities = null,
+                action = "network_snapshot_unavailable",
+            )
+            return
+        }
+        updateObservedNetworkState(
+            available = true,
+            capabilities = manager.getNetworkCapabilities(network),
+            action = "network_snapshot",
+        )
+    }
+
+    private fun updateObservedNetworkState(
+        available: Boolean,
+        capabilities: NetworkCapabilities?,
+        action: String,
+    ) {
+        val transport = capabilities.toTransportSummary()
+        val validated = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        val stateChanged =
+            networkAvailable != available ||
+                networkValidated != validated ||
+                lastObservedNetworkTransport != transport
+
+        val now = System.currentTimeMillis()
+        networkAvailable = available
+        networkValidated = validated
+        lastObservedNetworkTransport = transport
+        lastNetworkChangedAtMs = now
+        if (available) {
+            lastNetworkAvailableAtMs = now
+        } else {
+            lastNetworkLostAtMs = now
+        }
+        if (!stateChanged) return
+
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = action,
+            fields = recoveryContextFields(
+                "networkAvailable" to available.toString(),
+                "networkValidated" to validated?.toString(),
+                "networkTransport" to transport,
+            ),
+        )
+    }
+
+    private fun recoveryContextFields(vararg extra: Pair<String, String?>): Map<String, String?> {
+        val now = System.currentTimeMillis()
+        return buildMap {
+            put("sessionStatus", _sessionState.value.status.name)
+            put("isRestoring", _sessionState.value.isRestoring.toString())
+            put("appInForeground", appInForeground.toString())
+            put("pendingForegroundRecovery", pendingForegroundRecovery.toString())
+            put("sessionConnected", isConnected.toString())
+            put("sessionClientReady", (steamClient != null).toString())
+            put("networkAvailable", networkAvailable?.toString())
+            put("networkValidated", networkValidated?.toString())
+            put("networkTransport", lastObservedNetworkTransport)
+            put("msSinceAppForeground", ageSince(now, lastAppForegroundAtMs))
+            put("msSinceAppBackground", ageSince(now, lastAppBackgroundAtMs))
+            put("msSinceConnected", ageSince(now, lastConnectedAtMs))
+            put("msSinceDisconnected", ageSince(now, lastDisconnectedAtMs))
+            put("msSinceNetworkAvailable", ageSince(now, lastNetworkAvailableAtMs))
+            put("msSinceNetworkLost", ageSince(now, lastNetworkLostAtMs))
+            put("lastDisconnectCategory", lastDisconnectCategory)
+            put("lastDisconnectDetail", lastDisconnectDetail)
+            extra.forEach { (key, value) -> put(key, value) }
+        }
+    }
+
+    private fun ageSince(now: Long, timestampMs: Long?): String? {
+        return timestampMs?.let { (now - it).coerceAtLeast(0L).toString() }
+    }
+
+    private fun NetworkCapabilities?.toTransportSummary(): String? {
+        if (this == null) return null
+        val transports = buildList {
+            if (hasTransport(NetworkCapabilities.TRANSPORT_VPN)) add("VPN")
+            if (hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) add("WIFI")
+            if (hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) add("CELLULAR")
+            if (hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) add("ETHERNET")
+            if (hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) add("BLUETOOTH")
+        }
+        return if (transports.isEmpty()) "OTHER" else transports.joinToString("+")
+    }
+
+    private fun classifyDisconnectCategory(
+        userInitiated: Boolean,
+        interactiveLoginInProgress: Boolean,
+        restoring: Boolean,
+    ): String {
+        val now = System.currentTimeMillis()
+        return when {
+            manualLogout || userInitiated -> "user_initiated"
+            interactiveLoginInProgress -> "interactive_login_disconnect"
+            restoring -> "restoring_disconnect"
+            !appInForeground -> {
+                when {
+                    lastNetworkLostAtMs != null && now - lastNetworkLostAtMs!! <= 15_000L -> "background_network_loss"
+                    lastNetworkChangedAtMs != null && now - lastNetworkChangedAtMs!! <= 15_000L -> "background_network_change"
+                    else -> "background_disconnect"
+                }
+            }
+            lastNetworkLostAtMs != null && now - lastNetworkLostAtMs!! <= 15_000L -> "foreground_network_loss"
+            lastNetworkChangedAtMs != null && now - lastNetworkChangedAtMs!! <= 15_000L -> "foreground_network_change"
+            else -> "foreground_disconnect"
         }
     }
 
@@ -1030,6 +1287,86 @@ class SteamSessionManager @Inject constructor(
     }
 
     @WorkerThread
+    suspend fun loadAuthenticatedWorkshopQueryPage(
+        appId: Int,
+        query: WorkshopBrowseQuery,
+        forceRefresh: Boolean = false,
+    ): WorkshopBrowsePage = withContext(Dispatchers.IO) {
+        Log.d(LOG_TAG, "loadAuthenticatedWorkshopQueryPage appId=$appId")
+        ensureAuthenticated()
+        val steamId64 = currentSteamId64()
+        val normalizedSearchText = query.searchText.trim()
+        if (normalizedSearchText.isBlank()) {
+            return@withContext WorkshopBrowsePage(
+                items = emptyList(),
+                totalCount = 0,
+                page = query.page.coerceAtLeast(1),
+                hasMore = false,
+                sectionOptions = emptyList(),
+                sortOptions = emptyList(),
+                periodOptions = emptyList(),
+                tagGroups = emptyList(),
+                supportsIncompatibleFilter = false,
+            )
+        }
+        val normalizedQuery = query.copy(
+            searchText = normalizedSearchText,
+            page = query.page.coerceAtLeast(1),
+            pageSize = WorkshopBrowseQuery.normalizePageSize(query.pageSize),
+        )
+        val cacheKey = workshopAuthenticatedQueryCacheKey(
+            steamId64 = steamId64,
+            appId = appId,
+            query = normalizedQuery,
+        )
+        if (!forceRefresh) {
+            workshopAuthenticatedQueryPageCache[cacheKey]
+                ?.takeIf { it.isFresh(WORKSHOP_AUTHENTICATED_QUERY_CACHE_MS) }
+                ?.let { cached ->
+                    Log.d(LOG_TAG, "loadAuthenticatedWorkshopQueryPage hit cache appId=$appId")
+                    return@withContext cached.value
+                }
+        }
+
+        val request = SteammessagesPublishedfileSteamclient.CPublishedFile_QueryFiles_Request.newBuilder().apply {
+            queryType = EPublishedFileQueryType.RankedByTextSearch.code()
+            page = normalizedQuery.page
+            numperpage = normalizedQuery.pageSize
+            this.appid = appId
+            searchText = normalizedQuery.searchText
+            filetype = EWorkshopFileType.Community.code()
+            returnTags = true
+            returnPreviews = true
+            returnChildren = true
+            returnShortDescription = true
+            returnMetadata = true
+            returnDetails = true
+            stripDescriptionBbcode = true
+        }.build()
+
+        val response = publishedFileService?.queryFiles(request)?.await()
+            ?: error("Steam workshop service unavailable")
+        supportDiagnosticsStore.incrementCounter("steam_rpc_query_files_requests")
+        val details = response.body.publishedfiledetailsList
+            .filter { it.result == EResult.OK.code() }
+        val totalCount = if (response.body.hasTotal()) response.body.total else details.size
+        val nextCursor = response.body.nextCursor.takeIf(String::isNotBlank)
+        val parsed = WorkshopBrowsePage(
+            items = details.map(::mapPublishedFileDetails),
+            totalCount = totalCount,
+            page = normalizedQuery.page,
+            hasMore = nextCursor != null || normalizedQuery.page * normalizedQuery.pageSize < totalCount,
+            sectionOptions = emptyList(),
+            sortOptions = emptyList(),
+            periodOptions = emptyList(),
+            tagGroups = emptyList(),
+            supportsIncompatibleFilter = false,
+        )
+        workshopAuthenticatedQueryPageCache[cacheKey] = CachedValue(parsed)
+        parsed
+    }
+
+    @WorkerThread
     suspend fun loadSubscribedWorkshopPage(
         appId: Int,
         page: Int,
@@ -1240,16 +1577,24 @@ class SteamSessionManager @Inject constructor(
             accountName = prefs.accountName,
             steamId64 = prefs.steamId64,
         )
+        val boundAccountHashMatched =
+            boundAccountKeyHash.isNullOrBlank() ||
+                boundAccountKeyHash == currentSessionBindingHash ||
+                boundAccountKeyHash == persistedBindingHash
         val canUseAuthenticatedPath =
             prefs.isLoginFeatureEnabled &&
                 prefs.isLoggedInDownloadEnabled &&
-                _sessionState.value.status == SessionStatus.Authenticated &&
+                boundAccountHashMatched &&
+                hasUsableAuthenticatedDownloadSession()
+        val canAttemptAuthenticatedPath =
+            prefs.isLoginFeatureEnabled &&
+                prefs.isLoggedInDownloadEnabled &&
+                boundAccountHashMatched &&
                 (
-                    boundAccountKeyHash.isNullOrBlank() ||
-                        boundAccountKeyHash == currentSessionBindingHash ||
-                        boundAccountKeyHash == persistedBindingHash
+                    canUseAuthenticatedPath ||
+                        hasRecoverableAuthenticatedCredentials(prefs)
                 )
-        val allowAuthenticatedFallback = canUseAuthenticatedPath &&
+        val allowAuthenticatedFallback = canAttemptAuthenticatedPath &&
             (
                 downloadAuthMode == DownloadAuthMode.Authenticated ||
                     (
@@ -1259,7 +1604,7 @@ class SteamSessionManager @Inject constructor(
                 )
         val anonymousFirst = when (downloadAuthMode) {
             DownloadAuthMode.Anonymous -> true
-            DownloadAuthMode.Authenticated -> !allowAuthenticatedFallback
+            DownloadAuthMode.Authenticated -> !canUseAuthenticatedPath
             DownloadAuthMode.Auto -> true
         }
         supportDiagnosticsStore.recordDownloadDecision(
@@ -1273,13 +1618,14 @@ class SteamSessionManager @Inject constructor(
                 canUseAuthenticatedPath = canUseAuthenticatedPath,
                 allowAuthenticatedFallback = allowAuthenticatedFallback,
                 sessionStatus = _sessionState.value.status.name,
+                sessionConnected = isConnected,
+                sessionClientReady = steamClient != null && steamApps != null && steamContent != null,
+                recoveryInProgress = recoveryJob?.isActive == true || _sessionState.value.isRestoring,
                 isLoginFeatureEnabled = prefs.isLoginFeatureEnabled,
                 isLoggedInDownloadEnabled = prefs.isLoggedInDownloadEnabled,
                 preferAnonymousDownloads = prefs.preferAnonymousDownloads,
                 allowAuthenticatedDownloadFallbackSetting = prefs.allowAuthenticatedDownloadFallback,
-                boundAccountHashMatched = boundAccountKeyHash.isNullOrBlank() ||
-                    boundAccountKeyHash == currentSessionBindingHash ||
-                    boundAccountKeyHash == persistedBindingHash,
+                boundAccountHashMatched = boundAccountHashMatched,
             ),
         )
         supportDiagnosticsStore.recordDownloadEvent(
@@ -1291,6 +1637,9 @@ class SteamSessionManager @Inject constructor(
                 "authMode" to downloadAuthMode.name,
                 "anonymousFirst" to anonymousFirst.toString(),
                 "allowAuthenticatedFallback" to allowAuthenticatedFallback.toString(),
+                "sessionConnected" to isConnected.toString(),
+                "sessionClientReady" to (steamClient != null && steamApps != null && steamContent != null).toString(),
+                "recoveryInProgress" to (recoveryJob?.isActive == true || _sessionState.value.isRestoring).toString(),
             ),
         )
 
@@ -1343,11 +1692,23 @@ class SteamSessionManager @Inject constructor(
 
         if (anonymousFirst) {
             runCatching {
-                val anonymousAccess = loadWorkshopContentAccessAnonymously(
-                    appId = appId,
-                    manifestId = manifestId,
-                    depotId = item.appId.takeIf { it > 0 } ?: appId,
-                )
+                val anonymousAccess = runDownloadStage(
+                    taskId = stagingTaskId,
+                    stage = "anonymous_content_access",
+                    timeoutMs = DOWNLOAD_ANONYMOUS_CONTENT_ACCESS_TIMEOUT_MS,
+                    timeoutMessage = "获取匿名 Steam 内容访问超时，请检查当前网络后重试",
+                    fields = mapOf(
+                        "publishedFileId" to item.publishedFileId.toString(),
+                        "appId" to appId.toString(),
+                        "manifestId" to manifestId.toString(),
+                    ),
+                ) {
+                    loadWorkshopContentAccessAnonymously(
+                        appId = appId,
+                        manifestId = manifestId,
+                        depotId = item.appId.takeIf { it > 0 } ?: appId,
+                    )
+                }
                 downloadWorkshopItemViaContentAccess(
                     taskId = stagingTaskId,
                     item = item,
@@ -1376,8 +1737,21 @@ class SteamSessionManager @Inject constructor(
 
         if (allowAuthenticatedFallback) {
             runCatching {
-                val authenticatedDepotId = fetchWorkshopDepotId(appId)
+                val authenticatedDepotId = runDownloadStage(
+                    taskId = stagingTaskId,
+                    stage = "authenticated_depot_lookup",
+                    timeoutMs = DOWNLOAD_WORKSHOP_DEPOT_LOOKUP_TIMEOUT_MS,
+                    timeoutMessage = "获取 Workshop depot 信息超时，请稍后重试",
+                    fields = mapOf(
+                        "publishedFileId" to item.publishedFileId.toString(),
+                        "appId" to appId.toString(),
+                        "manifestId" to manifestId.toString(),
+                    ),
+                ) {
+                    fetchWorkshopDepotId(appId)
+                }
                 val authenticatedAccess = loadWorkshopContentAccessAuthenticated(
+                    taskId = stagingTaskId,
                     appId = appId,
                     depotId = authenticatedDepotId,
                     manifestId = manifestId,
@@ -1411,11 +1785,23 @@ class SteamSessionManager @Inject constructor(
 
         if (!anonymousFirst && downloadAuthMode != DownloadAuthMode.Anonymous) {
             runCatching {
-                val anonymousAccess = loadWorkshopContentAccessAnonymously(
-                    appId = appId,
-                    manifestId = manifestId,
-                    depotId = item.appId.takeIf { it > 0 } ?: appId,
-                )
+                val anonymousAccess = runDownloadStage(
+                    taskId = stagingTaskId,
+                    stage = "anonymous_content_access",
+                    timeoutMs = DOWNLOAD_ANONYMOUS_CONTENT_ACCESS_TIMEOUT_MS,
+                    timeoutMessage = "获取匿名 Steam 内容访问超时，请检查当前网络后重试",
+                    fields = mapOf(
+                        "publishedFileId" to item.publishedFileId.toString(),
+                        "appId" to appId.toString(),
+                        "manifestId" to manifestId.toString(),
+                    ),
+                ) {
+                    loadWorkshopContentAccessAnonymously(
+                        appId = appId,
+                        manifestId = manifestId,
+                        depotId = item.appId.takeIf { it > 0 } ?: appId,
+                    )
+                }
                 downloadWorkshopItemViaContentAccess(
                     taskId = stagingTaskId,
                     item = item,
@@ -2320,13 +2706,26 @@ class SteamSessionManager @Inject constructor(
     }
 
     private suspend fun loadWorkshopContentAccessAuthenticated(
+        taskId: String?,
         appId: Int,
         depotId: Int,
         manifestId: Long,
         boundAccountKeyHash: String?,
     ): WorkshopContentAccess {
         validateBoundAuthenticatedAccount(boundAccountKeyHash)
-        ensureAuthenticated()
+        runDownloadStage(
+            taskId = taskId,
+            stage = "authenticated_session_restore",
+            timeoutMs = DOWNLOAD_AUTH_RESTORE_TIMEOUT_MS,
+            timeoutMessage = "恢复 Steam 登录超时，请检查当前网络、代理或 VPN 设置后重试",
+            fields = mapOf(
+                "appId" to appId.toString(),
+                "depotId" to depotId.toString(),
+                "manifestId" to manifestId.toString(),
+            ),
+        ) {
+            ensureAuthenticated()
+        }
         val effectiveSteamId64 = _sessionState.value.account?.steamId64
             ?.takeIf { it > 0L }
         val cacheKey = WorkshopContentAccessCacheKey(
@@ -2340,21 +2739,51 @@ class SteamSessionManager @Inject constructor(
             return cached
         }
 
-        val depotKeyCallback = steamApps?.getDepotDecryptionKey(depotId, appId)?.await()
-            ?: error("无法获取 Workshop depot key")
+        val depotKeyCallback = runDownloadStage(
+            taskId = taskId,
+            stage = "authenticated_depot_key",
+            timeoutMs = DOWNLOAD_DEPOT_KEY_TIMEOUT_MS,
+            timeoutMessage = "获取已登录下载密钥超时，请稍后重试",
+            fields = mapOf(
+                "appId" to appId.toString(),
+                "depotId" to depotId.toString(),
+                "manifestId" to manifestId.toString(),
+            ),
+        ) {
+            steamApps?.getDepotDecryptionKey(depotId, appId)?.await()
+                ?: error("无法获取 Workshop depot key")
+        }
         check(depotKeyCallback.result == EResult.OK) { "Steam 返回 ${depotKeyCallback.result}" }
 
         val contentHandler = steamContent ?: error("Steam content handler 不可用")
-        val servers = loadAuthenticatedCdnServers(contentHandler)
+        val servers = loadAuthenticatedCdnServers(
+            contentHandler = contentHandler,
+            taskId = taskId,
+            appId = appId,
+            depotId = depotId,
+            manifestId = manifestId,
+        )
 
-        val manifestRequestCode = contentHandler.getManifestRequestCode(
-            depotId,
-            appId,
-            manifestId,
-            "public",
-            null,
-            appScope,
-        ).await()
+        val manifestRequestCode = runDownloadStage(
+            taskId = taskId,
+            stage = "authenticated_manifest_request",
+            timeoutMs = DOWNLOAD_MANIFEST_REQUEST_CODE_TIMEOUT_MS,
+            timeoutMessage = "获取 Steam manifest 访问码超时，请稍后重试",
+            fields = mapOf(
+                "appId" to appId.toString(),
+                "depotId" to depotId.toString(),
+                "manifestId" to manifestId.toString(),
+            ),
+        ) {
+            contentHandler.getManifestRequestCode(
+                depotId,
+                appId,
+                manifestId,
+                "public",
+                null,
+                appScope,
+            ).await()
+        }
 
         return WorkshopContentAccess(
             depotKey = depotKeyCallback.depotKey,
@@ -2637,7 +3066,89 @@ class SteamSessionManager @Inject constructor(
         val prefs = preferencesStore.snapshot()
         return prefs.isLoginFeatureEnabled &&
             prefs.isLoggedInDownloadEnabled &&
-            _sessionState.value.status == SessionStatus.Authenticated
+            hasUsableAuthenticatedDownloadSession()
+    }
+
+    private fun hasUsableAuthenticatedDownloadSession(): Boolean {
+        val state = _sessionState.value
+        return state.status == SessionStatus.Authenticated &&
+            !state.isRestoring &&
+            recoveryJob?.isActive != true &&
+            bootstrapJob?.isActive != true &&
+            isConnected &&
+            steamClient != null &&
+            steamApps != null &&
+            steamContent != null
+    }
+
+    private fun hasRecoverableAuthenticatedCredentials(
+        prefs: com.slay.workshopnative.data.preferences.UserPreferences,
+    ): Boolean {
+        return prefs.rememberSession &&
+            prefs.accountName.isNotBlank() &&
+            (prefs.refreshToken.isNotBlank() || pendingRefreshToken.isNotBlank())
+    }
+
+    private suspend fun <T> runDownloadStage(
+        taskId: String?,
+        stage: String,
+        timeoutMs: Long,
+        timeoutMessage: String,
+        fields: Map<String, String?> = emptyMap(),
+        block: suspend () -> T,
+    ): T {
+        supportDiagnosticsStore.recordDownloadEvent(
+            action = "${stage}_start",
+            taskId = taskId,
+            fields = fields + ("timeoutMs" to timeoutMs.toString()),
+        )
+        val startedAt = System.currentTimeMillis()
+        try {
+            val result = withTimeout(timeoutMs) { block() }
+            supportDiagnosticsStore.recordDownloadEvent(
+                action = "${stage}_success",
+                taskId = taskId,
+                fields = fields + ("durationMs" to (System.currentTimeMillis() - startedAt).toString()),
+            )
+            return result
+        } catch (throwable: Throwable) {
+            val durationMs = (System.currentTimeMillis() - startedAt).toString()
+            when {
+                throwable is TimeoutCancellationException -> {
+                    supportDiagnosticsStore.recordDownloadEvent(
+                        action = "${stage}_failure",
+                        taskId = taskId,
+                        fields = fields + mapOf(
+                            "durationMs" to durationMs,
+                            "message" to timeoutMessage,
+                            "timeout" to "true",
+                        ),
+                    )
+                    throw IllegalStateException(timeoutMessage, throwable)
+                }
+
+                throwable.isPauseSignal() || (throwable is CancellationException && !coroutineContext.isActive) -> {
+                    supportDiagnosticsStore.recordDownloadEvent(
+                        action = "${stage}_cancelled",
+                        taskId = taskId,
+                        fields = fields + ("durationMs" to durationMs),
+                    )
+                    throw throwable
+                }
+
+                else -> {
+                    supportDiagnosticsStore.recordDownloadEvent(
+                        action = "${stage}_failure",
+                        taskId = taskId,
+                        fields = fields + mapOf(
+                            "durationMs" to durationMs,
+                            "message" to readableMessage(throwable),
+                        ),
+                    )
+                    throw throwable
+                }
+            }
+        }
     }
 
     private fun getCachedWorkshopItem(
@@ -3018,6 +3529,10 @@ class SteamSessionManager @Inject constructor(
 
     private suspend fun loadAuthenticatedCdnServers(
         contentHandler: SteamContent,
+        taskId: String?,
+        appId: Int,
+        depotId: Int,
+        manifestId: Long,
     ): List<Server> {
         supportDiagnosticsStore.incrementCounter("steam_rpc_authenticated_cdn_servers")
         authenticatedCdnServersCache
@@ -3035,11 +3550,23 @@ class SteamSessionManager @Inject constructor(
                     return@withLock sortAvailableCdnServers(cached, "未找到可用的 Steam CDN 服务器")
                 }
 
-            val fetched = contentHandler.getServersForSteamPipe(
-                null,
-                CDN_SERVER_CANDIDATE_LIMIT,
-                appScope,
-            ).await()
+            val fetched = runDownloadStage(
+                taskId = taskId,
+                stage = "authenticated_cdn_servers",
+                timeoutMs = DOWNLOAD_CDN_SERVER_LIST_TIMEOUT_MS,
+                timeoutMessage = "获取 Steam CDN 列表超时，请检查当前网络、代理或 VPN 设置后重试",
+                fields = mapOf(
+                    "appId" to appId.toString(),
+                    "depotId" to depotId.toString(),
+                    "manifestId" to manifestId.toString(),
+                ),
+            ) {
+                contentHandler.getServersForSteamPipe(
+                    null,
+                    CDN_SERVER_CANDIDATE_LIMIT,
+                    appScope,
+                ).await()
+            }
             val servers = sortAvailableCdnServers(fetched, "未找到可用的 Steam CDN 服务器")
             authenticatedCdnServersCache = CachedValue(servers)
             servers
@@ -3712,7 +4239,7 @@ class SteamSessionManager @Inject constructor(
     private suspend fun ensureAuthenticated() {
         recoveryJob?.join()
         bootstrapJob?.join()
-        if (_sessionState.value.status == SessionStatus.Authenticated && steamClient != null) return
+        if (hasUsableAuthenticatedDownloadSession()) return
 
         val prefs = preferencesStore.snapshot()
         check(prefs.isLoginFeatureEnabled) { "已在设置中关闭登录功能" }
@@ -3736,7 +4263,7 @@ class SteamSessionManager @Inject constructor(
             )
         }
 
-        if (_sessionState.value.status == SessionStatus.Authenticated && steamClient != null) return
+        if (hasUsableAuthenticatedDownloadSession()) return
         error("当前未登录 Steam")
     }
 
@@ -3867,9 +4394,13 @@ class SteamSessionManager @Inject constructor(
     }
 
     private fun onConnected(@Suppress("UNUSED_PARAMETER") callback: ConnectedCallback) {
-        supportDiagnosticsStore.recordRecoveryEvent(action = "connected")
-        Log.i(LOG_TAG, "onConnected")
+        lastConnectedAtMs = System.currentTimeMillis()
         isConnected = true
+        supportDiagnosticsStore.recordRecoveryEvent(
+            action = "connected",
+            fields = recoveryContextFields(),
+        )
+        Log.i(LOG_TAG, "onConnected")
         connectDeferred?.complete(Unit)
     }
 
@@ -3881,16 +4412,40 @@ class SteamSessionManager @Inject constructor(
     }
 
     private fun onDisconnected(callback: DisconnectedCallback) {
+        val currentState = _sessionState.value
+        val interactiveLoginInProgress =
+            interactiveLoginJob?.isActive == true &&
+                currentState.status != SessionStatus.Authenticated
+        val disconnectCategory = classifyDisconnectCategory(
+            userInitiated = callback.isUserInitiated,
+            interactiveLoginInProgress = interactiveLoginInProgress,
+            restoring = currentState.isRestoring,
+        )
+        val disconnectDetail = buildString {
+            append("transport=")
+            append(lastObservedNetworkTransport ?: "unknown")
+            append(",networkAvailable=")
+            append(networkAvailable?.toString() ?: "unknown")
+            append(",networkValidated=")
+            append(networkValidated?.toString() ?: "unknown")
+        }
+        lastDisconnectedAtMs = System.currentTimeMillis()
+        lastDisconnectCategory = disconnectCategory
+        lastDisconnectDetail = disconnectDetail
+        lastDisconnectUserInitiated = callback.isUserInitiated
+        lastDisconnectWhileForeground = appInForeground
         supportDiagnosticsStore.recordRecoveryEvent(
             action = "disconnected",
-            fields = mapOf(
+            fields = recoveryContextFields(
                 "userInitiated" to callback.isUserInitiated.toString(),
                 "manualLogout" to manualLogout.toString(),
+                "disconnectCategory" to disconnectCategory,
+                "disconnectDetail" to disconnectDetail,
             ),
         )
         Log.w(
             LOG_TAG,
-            "onDisconnected userInitiated=${callback.isUserInitiated} manualLogout=$manualLogout",
+            "onDisconnected userInitiated=${callback.isUserInitiated} manualLogout=$manualLogout category=$disconnectCategory",
         )
         isConnected = false
         connectDeferred?.completeExceptionally(IllegalStateException("Steam 连接中断"))
@@ -3904,10 +4459,6 @@ class SteamSessionManager @Inject constructor(
         logonDeferred?.complete(Result.failure(IllegalStateException("Steam 连接已断开")))
         logonDeferred = null
 
-        val currentState = _sessionState.value
-        val interactiveLoginInProgress =
-            interactiveLoginJob?.isActive == true &&
-                currentState.status != SessionStatus.Authenticated
         if (interactiveLoginInProgress) {
             Log.w(LOG_TAG, "onDisconnected during interactive login; skip global recovery and let login flow retry")
             return
@@ -3917,18 +4468,25 @@ class SteamSessionManager @Inject constructor(
                 !currentState.account?.accountName.isNullOrBlank() &&
                 pendingRefreshToken.isNotBlank()
         if (canReconnectOnDemand) {
-            Log.i(LOG_TAG, "onDisconnected keep authenticated shell and defer reconnect until next network request")
+            pendingForegroundRecovery = !appInForeground
             teardownClient()
             _sessionState.value = currentState.copy(
                 status = SessionStatus.Authenticated,
                 challenge = null,
                 errorMessage = null,
-                isRestoring = false,
+                isRestoring = true,
             )
+            if (!appInForeground) {
+                Log.i(LOG_TAG, "onDisconnected keep authenticated shell and defer reconnect until foreground")
+                return
+            }
+            Log.i(LOG_TAG, "onDisconnected keep authenticated shell and recover immediately in foreground")
+            scheduleSessionRecovery("Steam 连接已断开，正在恢复登录状态")
             return
         }
 
         if (_sessionState.value.isRestoring) {
+            pendingForegroundRecovery = pendingForegroundRecovery || !appInForeground
             Log.w(LOG_TAG, "onDisconnected while restoring; skip nested recovery")
             return
         }
@@ -3939,7 +4497,7 @@ class SteamSessionManager @Inject constructor(
     private fun onLoggedOn(callback: LoggedOnCallback) {
         supportDiagnosticsStore.recordRecoveryEvent(
             action = "logged_on",
-            fields = mapOf("result" to callback.result.name),
+            fields = recoveryContextFields("result" to callback.result.name),
         )
         Log.i(LOG_TAG, "onLoggedOn result=${callback.result}")
         if (callback.result == EResult.OK) {
@@ -3980,7 +4538,7 @@ class SteamSessionManager @Inject constructor(
     private fun onLoggedOff(callback: LoggedOffCallback) {
         supportDiagnosticsStore.recordRecoveryEvent(
             action = "logged_off",
-            fields = mapOf(
+            fields = recoveryContextFields(
                 "result" to callback.result.name,
                 "manualLogout" to manualLogout.toString(),
             ),
@@ -3999,17 +4557,19 @@ class SteamSessionManager @Inject constructor(
         if (recoveryJob?.isActive == true) return
         supportDiagnosticsStore.recordRecoveryEvent(
             action = "schedule_recovery",
-            fields = mapOf("reason" to reason),
+            fields = recoveryContextFields("reason" to reason),
         )
         Log.w(LOG_TAG, "scheduleSessionRecovery reason=$reason")
 
         recoveryJob = appScope.launch {
+            pendingForegroundRecovery = false
             val previousAccount = _sessionState.value.account
             val keepAuthenticatedShell =
                 _sessionState.value.status == SessionStatus.Authenticated &&
                     (previousAccount?.steamId64 ?: 0L) > 0L
             val prefs = preferencesStore.snapshot()
             if (!prefs.rememberSession || prefs.refreshToken.isBlank() || prefs.accountName.isBlank()) {
+                pendingForegroundRecovery = false
                 teardownClient()
                 _sessionState.value = SteamSessionState(
                     status = SessionStatus.Error,
@@ -4043,6 +4603,7 @@ class SteamSessionManager @Inject constructor(
                 )
             }.onFailure { throwable ->
                 Log.w(LOG_TAG, "scheduleSessionRecovery failed", throwable)
+                pendingForegroundRecovery = false
                 teardownClient()
                 _sessionState.value = SteamSessionState(
                     status = SessionStatus.Error,
@@ -4144,6 +4705,25 @@ class SteamSessionManager @Inject constructor(
         pageSize: Int,
     ): String {
         return "subscriptions:$steamId64:$appId:$page:$pageSize"
+    }
+
+    private fun workshopAuthenticatedQueryCacheKey(
+        steamId64: Long,
+        appId: Int,
+        query: WorkshopBrowseQuery,
+    ): String {
+        return buildString {
+            append("auth-query:")
+            append(steamId64)
+            append(':')
+            append(appId)
+            append(':')
+            append(query.page)
+            append(':')
+            append(query.pageSize)
+            append(':')
+            append(query.searchText.trim().lowercase())
+        }
     }
 
     private fun parseWorkshopBrowsePage(
@@ -4459,6 +5039,7 @@ class SteamSessionManager @Inject constructor(
         workshopItemCache.clear()
         downloadWorkshopItemCache.clear()
         workshopBrowsePageCache.clear()
+        workshopAuthenticatedQueryPageCache.clear()
         workshopSubscriptionsPageCache.clear()
         workshopGamePageCache.clear()
         workshopGameSearchCache.clear()

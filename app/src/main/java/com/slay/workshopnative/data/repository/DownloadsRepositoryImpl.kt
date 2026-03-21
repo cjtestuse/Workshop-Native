@@ -153,7 +153,7 @@ class DownloadsRepositoryImpl @Inject constructor(
         val allowLoggedInDownload =
             prefs.isLoginFeatureEnabled &&
                 prefs.isLoggedInDownloadEnabled &&
-                session.status == SessionStatus.Authenticated
+                steamRepository.isAuthenticatedDownloadReady()
         val authMode = when {
             !allowLoggedInDownload -> DownloadAuthMode.Anonymous
             prefs.preferAnonymousDownloads -> DownloadAuthMode.Auto
@@ -649,12 +649,8 @@ class DownloadsRepositoryImpl @Inject constructor(
             "workshop-${latestItem.publishedFileId}",
         )
         val binding = currentAuthenticatedBinding() ?: DownloadBinding(
-            authMode = existing.downloadAuthMode,
-            boundAccountKeyHash = resolveAccountBindingHash(
-                existing.boundAccountKeyHash,
-                existing.boundAccountName,
-                existing.boundSteamId64,
-            ),
+            authMode = DownloadAuthMode.Anonymous,
+            boundAccountKeyHash = null,
         )
 
         downloadTaskDao.upsert(
@@ -708,6 +704,7 @@ class DownloadsRepositoryImpl @Inject constructor(
         if (session.status != SessionStatus.Authenticated) return null
         val prefs = preferencesStore.snapshot()
         if (!prefs.isLoginFeatureEnabled || !prefs.isLoggedInDownloadEnabled) return null
+        if (!steamRepository.isAuthenticatedDownloadReady()) return null
         val authMode = if (prefs.preferAnonymousDownloads) {
             DownloadAuthMode.Auto
         } else {

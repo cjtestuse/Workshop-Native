@@ -2,10 +2,13 @@ package com.slay.workshopnative.ui
 
 import com.slay.workshopnative.BuildConfig
 import com.slay.workshopnative.core.logging.AppLog
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.slay.workshopnative.data.model.SteamSessionState
 import com.slay.workshopnative.data.model.SessionStatus
+import com.slay.workshopnative.data.preferences.AppThemeMode
+import com.slay.workshopnative.data.preferences.DEFAULT_APP_THEME_MODE
 import com.slay.workshopnative.data.preferences.SavedSteamAccount
 import com.slay.workshopnative.data.repository.DownloadsRepository
 import com.slay.workshopnative.data.preferences.UserPreferencesStore
@@ -46,6 +49,7 @@ data class AppUpdateUiState(
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
+    private val savedStateHandle: SavedStateHandle,
     private val steamRepository: SteamRepository,
     private val preferencesStore: UserPreferencesStore,
     private val downloadsRepository: DownloadsRepository,
@@ -53,6 +57,12 @@ class MainViewModel @Inject constructor(
 ) : ViewModel() {
     private companion object {
         const val LOG_TAG = "MainViewModel"
+        const val DEFAULT_ROOT_TAB_ROUTE = "explore"
+        const val DEFAULT_WORKSHOP_MODE = "Browse"
+        const val KEY_ROOT_TAB_ROUTE = "root_tab_route"
+        const val KEY_ACTIVE_WORKSHOP_APP_ID = "active_workshop_app_id"
+        const val KEY_ACTIVE_WORKSHOP_APP_NAME = "active_workshop_app_name"
+        const val KEY_ACTIVE_WORKSHOP_MODE = "active_workshop_mode"
     }
 
     val sessionState: StateFlow<SteamSessionState> = steamRepository.sessionState
@@ -64,6 +74,14 @@ class MainViewModel @Inject constructor(
     val appUpdateState: StateFlow<AppUpdateUiState> = _appUpdateState.asStateFlow()
     private val _userMessages = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
+    val currentRootTabRoute: StateFlow<String> =
+        savedStateHandle.getStateFlow(KEY_ROOT_TAB_ROUTE, DEFAULT_ROOT_TAB_ROUTE)
+    val activeWorkshopAppId: StateFlow<Int?> =
+        savedStateHandle.getStateFlow(KEY_ACTIVE_WORKSHOP_APP_ID, null)
+    val activeWorkshopAppName: StateFlow<String> =
+        savedStateHandle.getStateFlow(KEY_ACTIVE_WORKSHOP_APP_NAME, "")
+    val activeWorkshopMode: StateFlow<String> =
+        savedStateHandle.getStateFlow(KEY_ACTIVE_WORKSHOP_MODE, DEFAULT_WORKSHOP_MODE)
     val hasAcknowledgedDisclaimer: StateFlow<Boolean?> = preferencesStore.preferences
         .map { it.hasAcknowledgedDisclaimer }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
@@ -79,6 +97,9 @@ class MainViewModel @Inject constructor(
     val showLibraryTab: StateFlow<Boolean> = preferencesStore.preferences
         .map { prefs -> prefs.isLoginFeatureEnabled && prefs.isOwnedGamesDisplayEnabled }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+    val themeMode: StateFlow<AppThemeMode> = preferencesStore.preferences
+        .map { it.themeMode }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DEFAULT_APP_THEME_MODE)
 
     init {
         viewModelScope.launch {
@@ -147,6 +168,26 @@ class MainViewModel @Inject constructor(
 
     fun onAppForegrounded() {
         steamRepository.onAppForegrounded()
+    }
+
+    fun onAppBackgrounded() {
+        steamRepository.onAppBackgrounded()
+    }
+
+    fun navigateRootTab(route: String) {
+        savedStateHandle[KEY_ROOT_TAB_ROUTE] = route
+    }
+
+    fun openWorkshop(appId: Int, appName: String, launchMode: String) {
+        savedStateHandle[KEY_ACTIVE_WORKSHOP_APP_ID] = appId
+        savedStateHandle[KEY_ACTIVE_WORKSHOP_APP_NAME] = appName
+        savedStateHandle[KEY_ACTIVE_WORKSHOP_MODE] = launchMode
+    }
+
+    fun closeWorkshop() {
+        savedStateHandle[KEY_ACTIVE_WORKSHOP_APP_ID] = null
+        savedStateHandle[KEY_ACTIVE_WORKSHOP_APP_NAME] = ""
+        savedStateHandle[KEY_ACTIVE_WORKSHOP_MODE] = DEFAULT_WORKSHOP_MODE
     }
 
     fun login(username: String, password: String, rememberSession: Boolean) {

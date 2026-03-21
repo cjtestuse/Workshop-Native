@@ -3,6 +3,7 @@ package com.slay.workshopnative.ui.feature.settings
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.slay.workshopnative.core.logging.MainActivityRuntimeTracker
 import com.slay.workshopnative.core.logging.SupportBundleTextEntry
 import com.slay.workshopnative.core.logging.SupportCdnExportSnapshot
 import com.slay.workshopnative.core.logging.SupportDiagnosticsSnapshot
@@ -19,9 +20,11 @@ import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
+import com.slay.workshopnative.data.preferences.AppThemeMode
 import com.slay.workshopnative.data.preferences.DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY
 import com.slay.workshopnative.data.preferences.DEFAULT_AZURE_TRANSLATOR_ENDPOINT
 import com.slay.workshopnative.data.preferences.DEFAULT_TRANSLATION_PROVIDER
+import com.slay.workshopnative.data.preferences.DEFAULT_APP_THEME_MODE
 import com.slay.workshopnative.data.preferences.DownloadPerformanceMode
 import com.slay.workshopnative.data.local.DownloadTaskDao
 import com.slay.workshopnative.data.local.DownloadTaskEntity
@@ -101,6 +104,7 @@ data class SettingsUiState(
     val translationAzureRegion: String = "",
     val translationAzureApiKey: String = "",
     val translationGoogleApiKey: String = "",
+    val themeMode: AppThemeMode = DEFAULT_APP_THEME_MODE,
     val isTranslationConfigured: Boolean = DEFAULT_TRANSLATION_PROVIDER.isReady(
         azureEndpoint = DEFAULT_AZURE_TRANSLATOR_ENDPOINT,
         azureApiKey = "",
@@ -182,6 +186,7 @@ class SettingsViewModel @Inject constructor(
             translationAzureRegion = prefs.translationAzureRegion,
             translationAzureApiKey = prefs.translationAzureApiKey,
             translationGoogleApiKey = prefs.translationGoogleApiKey,
+            themeMode = prefs.themeMode,
             isTranslationConfigured = prefs.isTranslationConfigured,
             isVerifyingTranslation = translationStatus.isVerifying,
             translationStatusSummary = translationStatus.summary,
@@ -324,6 +329,15 @@ class SettingsViewModel @Inject constructor(
                 } else {
                     "已关闭启动时自动检查更新，仍可手动检查。"
                 },
+            )
+        }
+    }
+
+    fun saveAppThemeMode(themeMode: AppThemeMode) {
+        viewModelScope.launch {
+            preferencesStore.saveAppThemeMode(themeMode)
+            maintenanceState.value = MaintenanceUiState(
+                summary = "已切换到${themeMode.displayLabel()}主题。",
             )
         }
     }
@@ -679,6 +693,7 @@ class SettingsViewModel @Inject constructor(
         val downloadSnapshots = downloads
             .sortedByDescending(DownloadTaskEntity::createdAt)
             .map(::toSupportDownloadTaskSnapshot)
+        val activityRuntimeSnapshot = MainActivityRuntimeTracker.snapshot()
         val sessionSnapshot = SupportSessionSnapshot(
             exportedAtMs = exportedAtMs,
             sessionStatus = sessionStatus,
@@ -688,6 +703,8 @@ class SettingsViewModel @Inject constructor(
             isGuestMode = sessionStatus != "Authenticated",
             savedAccountsCount = savedAccountsCount,
             currentAccountBindingHashPrefix = currentAccountBindingHash?.take(12),
+            runtime = steamRepository.sessionRuntimeSnapshot(),
+            activityRuntime = activityRuntimeSnapshot,
         )
         val settingsSnapshot = SupportSettingsSnapshot(
             exportedAtMs = exportedAtMs,
@@ -737,6 +754,10 @@ class SettingsViewModel @Inject constructor(
             SupportBundleTextEntry(
                 name = "diagnostics/session_snapshot.json",
                 payload = json.encodeToString(sessionSnapshot),
+            ),
+            SupportBundleTextEntry(
+                name = "diagnostics/activity_snapshot.json",
+                payload = json.encodeToString(activityRuntimeSnapshot),
             ),
             SupportBundleTextEntry(
                 name = "diagnostics/app_settings_snapshot.json",

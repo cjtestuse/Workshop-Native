@@ -34,6 +34,7 @@ import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PrivacyTip
 import androidx.compose.material.icons.rounded.Restore
 import androidx.compose.material.icons.rounded.SystemUpdateAlt
@@ -87,17 +88,22 @@ import com.slay.workshopnative.core.util.openUrlWithChooser
 import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
+import com.slay.workshopnative.data.preferences.AppThemeMode
 import com.slay.workshopnative.data.preferences.DEFAULT_AZURE_TRANSLATOR_ENDPOINT
 import com.slay.workshopnative.data.preferences.DownloadPerformanceMode
 import com.slay.workshopnative.data.preferences.TranslationProvider
+import com.slay.workshopnative.data.preferences.descriptionLabel
 import com.slay.workshopnative.data.preferences.displayLabel
 import com.slay.workshopnative.data.preferences.isExperimental
 import com.slay.workshopnative.data.preferences.settingsStatusLabel
 import com.slay.workshopnative.ui.AppNoticeItem
 import com.slay.workshopnative.ui.AppUpdateUiState
 import com.slay.workshopnative.ui.WorkshopNativeAbout
+import com.slay.workshopnative.ui.theme.workshopAdaptiveBorderColor
+import com.slay.workshopnative.ui.theme.workshopAdaptiveSurfaceColor
 
 private enum class SettingsDestination {
+    Appearance,
     DownloadLocation,
     DownloadStrategy,
     Workshop,
@@ -271,6 +277,24 @@ fun SettingsScreen(
         item {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SettingsSectionHeader(
+                    title = "显示与外观",
+                    subtitle = "支持跟随系统，也可以单独固定浅色或深色主题。",
+                )
+                SettingsPanel {
+                    SettingsNavigationRow(
+                        icon = Icons.Rounded.Palette,
+                        iconTint = Color(0xFF7A5A3A),
+                        title = "主题模式",
+                        summary = uiState.themeMode.displayLabel(),
+                        onClick = { activeDestinationName = SettingsDestination.Appearance.name },
+                    )
+                }
+            }
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsSectionHeader(
                     title = "下载与浏览",
                     subtitle = "高频设置保留在首页，复杂选项再进入详情页。",
                 )
@@ -399,6 +423,7 @@ fun SettingsScreen(
         ) {
             SettingsSheetScaffold(
                 title = when (destination) {
+                    SettingsDestination.Appearance -> "主题模式"
                     SettingsDestination.DownloadLocation -> "下载位置"
                     SettingsDestination.DownloadStrategy -> "下载策略"
                     SettingsDestination.Workshop -> "创意工坊"
@@ -408,6 +433,7 @@ fun SettingsScreen(
                     SettingsDestination.UsageBoundary -> "学习交流与使用边界"
                 },
                 subtitle = when (destination) {
+                    SettingsDestination.Appearance -> "控制应用外观跟随系统，还是固定为浅色或深色。"
                     SettingsDestination.DownloadLocation -> "控制结果最终整理到哪里。"
                     SettingsDestination.DownloadStrategy -> "控制并发、匿名优先和 CDN 连接策略。"
                     SettingsDestination.Workshop -> "控制每页数量与下载方式检测。"
@@ -418,6 +444,11 @@ fun SettingsScreen(
                 },
             ) {
                 when (destination) {
+                    SettingsDestination.Appearance -> ThemeSettingsContent(
+                        currentMode = uiState.themeMode,
+                        onThemeModeSelect = viewModel::saveAppThemeMode,
+                    )
+
                     SettingsDestination.DownloadLocation -> DownloadLocationContent(
                         uiState = uiState,
                         onFolderNameChange = viewModel::saveDownloadFolderName,
@@ -517,6 +548,35 @@ fun SettingsScreen(
             containerColor = MaterialTheme.colorScheme.surface,
         )
     }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ThemeSettingsContent(
+    currentMode: AppThemeMode,
+    onThemeModeSelect: (AppThemeMode) -> Unit,
+) {
+    SettingsSubsectionTitle(
+        title = "应用主题",
+        subtitle = "当前 ${currentMode.displayLabel()}。",
+    )
+
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        AppThemeMode.entries.forEach { option ->
+            SettingsChoiceChip(
+                label = option.displayLabel(),
+                selected = currentMode == option,
+                onClick = { onThemeModeSelect(option) },
+            )
+        }
+    }
+
+    SettingsInlineHint(text = currentMode.descriptionLabel())
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+    SettingsInlineHint(text = "深色模式下会优先使用主题化的深色卡片和文字，避免浅底亮字导致对比度不足。")
 }
 
 @Composable
@@ -809,10 +869,13 @@ private fun SettingsPanel(
 ) {
     Surface(
         shape = RoundedCornerShape(26.dp),
-        color = Color.White.copy(alpha = 0.86f),
+        color = workshopAdaptiveSurfaceColor(
+            light = Color.White.copy(alpha = 0.86f),
+        ),
         shadowElevation = 6.dp,
         tonalElevation = 2.dp,
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.4f)),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor()),
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(
             modifier = Modifier.padding(16.dp),

@@ -118,6 +118,7 @@ data class UserPreferences(
     val translationAzureApiKey: String = "",
     val translationGoogleApiKey: String = "",
     val favoriteWorkshopGames: List<FavoriteWorkshopGame> = emptyList(),
+    val themeMode: AppThemeMode = DEFAULT_APP_THEME_MODE,
 ) {
     val isTranslationConfigured: Boolean
         get() = translationProvider.isReady(
@@ -173,6 +174,7 @@ class UserPreferencesStore @Inject constructor(
         val TRANSLATION_AZURE_REGION = stringPreferencesKey("translation_azure_region")
         val TRANSLATION_SECRET_VERSION = longPreferencesKey("translation_secret_version")
         val FAVORITE_WORKSHOP_GAMES_JSON = stringPreferencesKey("favorite_workshop_games_json")
+        val APP_THEME_MODE = stringPreferencesKey("app_theme_mode")
         val OWNED_GAMES_SNAPSHOT_STEAM_ID64 = longPreferencesKey("owned_games_snapshot_steam_id64")
         val OWNED_GAMES_SNAPSHOT_SAVED_AT_MS = longPreferencesKey("owned_games_snapshot_saved_at_ms")
         val OWNED_GAMES_SNAPSHOT_JSON = stringPreferencesKey("owned_games_snapshot_json")
@@ -212,6 +214,9 @@ class UserPreferencesStore @Inject constructor(
             val translationProvider = prefs[TRANSLATION_PROVIDER]
                 ?.let { value -> runCatching { TranslationProvider.valueOf(value) }.getOrNull() }
                 ?: DEFAULT_TRANSLATION_PROVIDER
+            val themeMode = prefs[APP_THEME_MODE]
+                ?.let { value -> runCatching { AppThemeMode.valueOf(value) }.getOrNull() }
+                ?: DEFAULT_APP_THEME_MODE
             val savedAccounts = if (isLoginFeatureEnabled) {
                 buildSavedAccounts(
                     accountName = actualActiveSessionProfile.accountName,
@@ -269,6 +274,7 @@ class UserPreferencesStore @Inject constructor(
                 translationAzureApiKey = secureSessionStore.readTranslationAzureApiKey(),
                 translationGoogleApiKey = secureSessionStore.readTranslationGoogleApiKey(),
                 favoriteWorkshopGames = decodeFavoriteWorkshopGames(prefs[FAVORITE_WORKSHOP_GAMES_JSON]),
+                themeMode = themeMode,
             )
         }
         .flowOn(Dispatchers.IO)
@@ -521,6 +527,12 @@ class UserPreferencesStore @Inject constructor(
     suspend fun saveAutoCheckAppUpdates(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[AUTO_CHECK_APP_UPDATES] = enabled
+        }
+    }
+
+    suspend fun saveAppThemeMode(themeMode: AppThemeMode) {
+        dataStore.edit { prefs ->
+            prefs[APP_THEME_MODE] = themeMode.name
         }
     }
 

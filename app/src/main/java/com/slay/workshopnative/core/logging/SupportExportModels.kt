@@ -35,6 +35,9 @@ data class SupportDownloadDecisionSnapshot(
     val canUseAuthenticatedPath: Boolean,
     val allowAuthenticatedFallback: Boolean,
     val sessionStatus: String,
+    val sessionConnected: Boolean,
+    val sessionClientReady: Boolean,
+    val recoveryInProgress: Boolean,
     val isLoginFeatureEnabled: Boolean,
     val isLoggedInDownloadEnabled: Boolean,
     val preferAnonymousDownloads: Boolean,
@@ -141,6 +144,55 @@ data class SupportDownloadTaskSnapshot(
 )
 
 @Serializable
+data class SupportSessionRuntimeSnapshot(
+    val appInForeground: Boolean,
+    val pendingForegroundRecovery: Boolean,
+    val sessionConnected: Boolean,
+    val sessionClientReady: Boolean,
+    val hasSteamApps: Boolean,
+    val hasSteamContent: Boolean,
+    val recoveryInProgress: Boolean,
+    val bootstrapInProgress: Boolean,
+    val interactiveLoginInProgress: Boolean,
+    val networkAvailable: Boolean? = null,
+    val networkValidated: Boolean? = null,
+    val networkTransport: String? = null,
+    val lastAppForegroundAtMs: Long? = null,
+    val lastAppBackgroundAtMs: Long? = null,
+    val lastConnectedAtMs: Long? = null,
+    val lastDisconnectedAtMs: Long? = null,
+    val lastNetworkAvailableAtMs: Long? = null,
+    val lastNetworkLostAtMs: Long? = null,
+    val lastNetworkChangedAtMs: Long? = null,
+    val lastDisconnectCategory: String? = null,
+    val lastDisconnectDetail: String? = null,
+    val lastDisconnectUserInitiated: Boolean? = null,
+    val lastDisconnectWhileForeground: Boolean? = null,
+)
+
+@Serializable
+data class SupportActivityRuntimeSnapshot(
+    val mainActivityCreateCount: Int,
+    val mainActivityNewIntentCount: Int,
+    val mainActivityDestroyCount: Int,
+    val activeMainActivityCount: Int,
+    val maxActiveMainActivityCount: Int,
+    val duplicateMainActivityDetected: Boolean,
+    val lastDuplicateDetectedAtMs: Long? = null,
+    val lastCreatedAtMs: Long? = null,
+    val lastNewIntentAtMs: Long? = null,
+    val lastDestroyedAtMs: Long? = null,
+    val lastResumedAtMs: Long? = null,
+    val lastStoppedAtMs: Long? = null,
+    val lastTaskId: Int? = null,
+    val lastIntentFlags: Int? = null,
+    val lastLaunchHadSavedState: Boolean? = null,
+    val lastDestroyedChangingConfigurations: Boolean? = null,
+    val lastCreatedInstanceId: String? = null,
+    val lastResumedInstanceId: String? = null,
+)
+
+@Serializable
 data class SupportSessionSnapshot(
     val exportedAtMs: Long,
     val sessionStatus: String,
@@ -150,6 +202,8 @@ data class SupportSessionSnapshot(
     val isGuestMode: Boolean,
     val savedAccountsCount: Int,
     val currentAccountBindingHashPrefix: String? = null,
+    val runtime: SupportSessionRuntimeSnapshot? = null,
+    val activityRuntime: SupportActivityRuntimeSnapshot? = null,
 )
 
 @Serializable

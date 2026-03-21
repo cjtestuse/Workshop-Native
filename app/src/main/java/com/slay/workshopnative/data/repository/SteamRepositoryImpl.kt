@@ -8,6 +8,7 @@ import com.slay.workshopnative.data.model.WorkshopBrowseQuery
 import com.slay.workshopnative.data.model.WorkshopGameEntry
 import com.slay.workshopnative.data.model.WorkshopGamePage
 import com.slay.workshopnative.data.model.WorkshopItem
+import com.slay.workshopnative.core.logging.SupportSessionRuntimeSnapshot
 import com.slay.workshopnative.data.remote.SteamSessionManager
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -20,6 +21,8 @@ class SteamRepositoryImpl @Inject constructor(
 
     override val sessionState: StateFlow<SteamSessionState> = sessionManager.sessionState
 
+    override fun isAuthenticatedDownloadReady(): Boolean = sessionManager.isAuthenticatedDownloadReady()
+
     override suspend fun bootstrap() {
         sessionManager.bootstrap()
     }
@@ -30,6 +33,14 @@ class SteamRepositoryImpl @Inject constructor(
 
     override fun onAppForegrounded() {
         sessionManager.onAppForegrounded()
+    }
+
+    override fun onAppBackgrounded() {
+        sessionManager.onAppBackgrounded()
+    }
+
+    override fun sessionRuntimeSnapshot(): SupportSessionRuntimeSnapshot {
+        return sessionManager.sessionRuntimeSnapshot()
     }
 
     override fun login(username: String, password: String, rememberSession: Boolean) {
@@ -82,6 +93,14 @@ class SteamRepositoryImpl @Inject constructor(
         forceRefresh: Boolean,
     ): Result<WorkshopBrowsePage> {
         return runCatching { sessionManager.loadWorkshopBrowsePage(appId, query, forceRefresh) }
+    }
+
+    override suspend fun loadAuthenticatedWorkshopQueryPage(
+        appId: Int,
+        query: WorkshopBrowseQuery,
+        forceRefresh: Boolean,
+    ): Result<WorkshopBrowsePage> {
+        return runCatching { sessionManager.loadAuthenticatedWorkshopQueryPage(appId, query, forceRefresh) }
     }
 
     override suspend fun loadSubscribedWorkshopPage(
