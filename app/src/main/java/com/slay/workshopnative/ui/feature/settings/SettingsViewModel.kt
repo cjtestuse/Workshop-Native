@@ -86,6 +86,7 @@ data class SettingsUiState(
     val isOwnedGamesDisplayEnabled: Boolean = false,
     val isSubscriptionDisplayEnabled: Boolean = false,
     val autoCheckAppUpdates: Boolean = false,
+    val autoCheckDownloadedModUpdatesOnLaunch: Boolean = false,
     val defaultGuestMode: Boolean = true,
     val downloadFolderName: String = DEFAULT_DOWNLOAD_FOLDER_NAME,
     val effectiveDownloadFolderName: String = DEFAULT_DOWNLOAD_FOLDER_NAME,
@@ -93,12 +94,21 @@ data class SettingsUiState(
     val downloadTreeLabel: String? = null,
     val downloadPerformanceMode: DownloadPerformanceMode = DownloadPerformanceMode.Auto,
     val downloadChunkConcurrency: Int = DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY,
+    val primordialReducedMemoryProtectionEnabled: Boolean = false,
+    val primordialAuthenticatedAggressiveCdnEnabled: Boolean = false,
     val preferAnonymousDownloads: Boolean = true,
     val allowAuthenticatedDownloadFallback: Boolean = true,
     val cdnTransportPreference: CdnTransportPreference = CdnTransportPreference.Auto,
     val cdnPoolPreference: CdnPoolPreference = CdnPoolPreference.Auto,
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
     val workshopAutoResolveVisibleItems: Boolean = false,
+    val animatedWorkshopPreviewEnabled: Boolean = false,
+    val terrariaArchivePostProcessorEnabled: Boolean = false,
+    val terrariaArchiveKeepOriginal: Boolean = false,
+    val wallpaperEnginePkgExtractEnabled: Boolean = false,
+    val wallpaperEnginePkgKeepOriginal: Boolean = false,
+    val wallpaperEngineTexConversionEnabled: Boolean = false,
+    val wallpaperEngineKeepConvertedTexOriginal: Boolean = true,
     val translationProvider: TranslationProvider = DEFAULT_TRANSLATION_PROVIDER,
     val translationAzureEndpoint: String = DEFAULT_AZURE_TRANSLATOR_ENDPOINT,
     val translationAzureRegion: String = "",
@@ -168,6 +178,7 @@ class SettingsViewModel @Inject constructor(
             isOwnedGamesDisplayEnabled = prefs.isOwnedGamesDisplayEnabled,
             isSubscriptionDisplayEnabled = prefs.isSubscriptionDisplayEnabled,
             autoCheckAppUpdates = prefs.autoCheckAppUpdates,
+            autoCheckDownloadedModUpdatesOnLaunch = prefs.autoCheckDownloadedModUpdatesOnLaunch,
             defaultGuestMode = prefs.defaultGuestMode,
             downloadFolderName = prefs.downloadFolderName,
             effectiveDownloadFolderName = effectiveFolderName,
@@ -175,12 +186,21 @@ class SettingsViewModel @Inject constructor(
             downloadTreeLabel = prefs.downloadTreeLabel,
             downloadPerformanceMode = prefs.downloadPerformanceMode,
             downloadChunkConcurrency = prefs.downloadChunkConcurrency,
+            primordialReducedMemoryProtectionEnabled = prefs.primordialReducedMemoryProtectionEnabled,
+            primordialAuthenticatedAggressiveCdnEnabled = prefs.primordialAuthenticatedAggressiveCdnEnabled,
             preferAnonymousDownloads = prefs.preferAnonymousDownloads,
             allowAuthenticatedDownloadFallback = prefs.allowAuthenticatedDownloadFallback,
             cdnTransportPreference = prefs.cdnTransportPreference,
             cdnPoolPreference = prefs.cdnPoolPreference,
             workshopPageSize = prefs.workshopPageSize,
             workshopAutoResolveVisibleItems = prefs.workshopAutoResolveVisibleItems,
+            animatedWorkshopPreviewEnabled = prefs.animatedWorkshopPreviewEnabled,
+            terrariaArchivePostProcessorEnabled = prefs.terrariaArchivePostProcessorEnabled,
+            terrariaArchiveKeepOriginal = prefs.terrariaArchiveKeepOriginal,
+            wallpaperEnginePkgExtractEnabled = prefs.wallpaperEnginePkgExtractEnabled,
+            wallpaperEnginePkgKeepOriginal = prefs.wallpaperEnginePkgKeepOriginal,
+            wallpaperEngineTexConversionEnabled = prefs.wallpaperEngineTexConversionEnabled,
+            wallpaperEngineKeepConvertedTexOriginal = prefs.wallpaperEngineKeepConvertedTexOriginal,
             translationProvider = prefs.translationProvider,
             translationAzureEndpoint = prefs.translationAzureEndpoint,
             translationAzureRegion = prefs.translationAzureRegion,
@@ -245,6 +265,34 @@ class SettingsViewModel @Inject constructor(
                         "已切到自动高性能下载。高内存设备会放宽并发，低内存设备仍会自动收紧。"
                     DownloadPerformanceMode.Compatibility ->
                         "已切到兼容模式。下载会更保守地限制并发和连接激进度。"
+                    DownloadPerformanceMode.Primordial ->
+                        "已切到洪荒模式。下载会使用更激进的并发与节点策略，可能更快，但更容易带来发热、波动或失败。"
+                },
+            )
+        }
+    }
+
+    fun savePrimordialReducedMemoryProtectionEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.savePrimordialReducedMemoryProtectionEnabled(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启“降低内存保护强度”。仅对洪荒模式生效，会更激进地放宽并发收紧，速度可能更高，但也更容易带来发热、卡顿、掉登录、下载失败或闪退。"
+                } else {
+                    "已关闭“降低内存保护强度”。洪荒模式恢复为带保护的实验档。"
+                },
+            )
+        }
+    }
+
+    fun savePrimordialAuthenticatedAggressiveCdnEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.savePrimordialAuthenticatedAggressiveCdnEnabled(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启“已登录下载使用激进 CDN 策略”。洪荒模式下，账号下载也会使用更激进的首连、选路和并发路由策略，更容易提速，但也更容易遇到限流、掉登录、失败重试或会话波动。"
+                } else {
+                    "已关闭“已登录下载使用激进 CDN 策略”。洪荒模式下，只有匿名下载会默认使用更激进的 CDN 优化。"
                 },
             )
         }
@@ -333,6 +381,19 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun saveAutoCheckDownloadedModUpdatesOnLaunch(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveAutoCheckDownloadedModUpdatesOnLaunch(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启“启动时检查已下载更新”。应用冷启动时会按公开工坊数据检查一次已下载条目更新，并在发现可更新条目时弹出选择窗口。"
+                } else {
+                    "已关闭“启动时检查已下载更新”。后续只会在你手动点“检查已下载更新”时检查。"
+                },
+            )
+        }
+    }
+
     fun saveAppThemeMode(themeMode: AppThemeMode) {
         viewModelScope.launch {
             preferencesStore.saveAppThemeMode(themeMode)
@@ -386,6 +447,97 @@ class SettingsViewModel @Inject constructor(
                     "已开启列表预读。当前可见工坊条目的下载方式会提前检测，请求量会略高。"
                 } else {
                     "已关闭列表预读。工坊列表会先轻量加载，详情和下载方式改为点开后再检测。"
+                },
+            )
+        }
+    }
+
+    fun saveAnimatedWorkshopPreviewEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveAnimatedWorkshopPreviewEnabled(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启工坊动态预览。工坊列表会改用新的 GIF 预览渲染逻辑，Wallpaper Engine 这类条目的缩略图会动起来，但也会增加流量、内存和滚动负担。"
+                } else {
+                    "已关闭工坊动态预览。工坊列表已恢复为原来的静态缩略图逻辑。"
+                },
+            )
+        }
+    }
+
+    fun saveTerrariaArchivePostProcessorEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveTerrariaArchivePostProcessorEnabled(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启 Terraria 压缩导出。命中 Terraria 工坊下载时，会在下载完成后额外生成 _Post 压缩结果。"
+                } else {
+                    "已关闭 Terraria 压缩导出。下载流程已恢复为当前默认落盘逻辑。"
+                },
+            )
+        }
+    }
+
+    fun saveTerrariaArchiveKeepOriginal(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveTerrariaArchiveKeepOriginal(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "Terraria 压缩导出将保留原目录，并额外生成 _Post 压缩结果。"
+                } else {
+                    "Terraria 压缩导出将只保留 _Post 压缩结果，不再额外保留原目录。"
+                },
+            )
+        }
+    }
+
+    fun saveWallpaperEnginePkgExtractEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveWallpaperEnginePkgExtractEnabled(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启 Wallpaper Engine PKG 提取。命中 Wallpaper Engine 工坊下载且目录中包含 .pkg 时，会在下载完成后额外生成 _Post 提取结果。"
+                } else {
+                    "已关闭 Wallpaper Engine PKG 提取。Wallpaper Engine 工坊下载已恢复为当前默认落盘逻辑。"
+                },
+            )
+        }
+    }
+
+    fun saveWallpaperEnginePkgKeepOriginal(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveWallpaperEnginePkgKeepOriginal(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "Wallpaper Engine PKG 提取将保留原目录，并额外生成 _Post 提取结果。"
+                } else {
+                    "Wallpaper Engine PKG 提取将只保留 _Post 提取结果，不再额外保留原目录。"
+                },
+            )
+        }
+    }
+
+    fun saveWallpaperEngineTexConversionEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveWallpaperEngineTexConversionEnabled(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "已开启 Wallpaper Engine TEX 转图片。命中可识别的 TEX 时，会额外尝试转换成 png、jpg 或 mp4。当前只覆盖最常见、最稳定的几类格式，不会生成 .mpkg。"
+                } else {
+                    "已关闭 Wallpaper Engine TEX 转图片。Wallpaper Engine 后处理将只提取 PKG，不再额外尝试转换 TEX。"
+                },
+            )
+        }
+    }
+
+    fun saveWallpaperEngineKeepConvertedTexOriginal(enabled: Boolean) {
+        viewModelScope.launch {
+            preferencesStore.saveWallpaperEngineKeepConvertedTexOriginal(enabled)
+            maintenanceState.value = MaintenanceUiState(
+                summary = if (enabled) {
+                    "Wallpaper Engine TEX 转图片后将保留原始 TEX，避免因部分格式暂不支持而丢失原始资源。"
+                } else {
+                    "Wallpaper Engine TEX 转图片后会删除已成功转换的原始 TEX，只保留转换结果。"
                 },
             )
         }
@@ -713,6 +865,7 @@ class SettingsViewModel @Inject constructor(
             isOwnedGamesDisplayEnabled = prefs.isOwnedGamesDisplayEnabled,
             isSubscriptionDisplayEnabled = prefs.isSubscriptionDisplayEnabled,
             autoCheckAppUpdates = prefs.autoCheckAppUpdates,
+            autoCheckDownloadedModUpdatesOnLaunch = prefs.autoCheckDownloadedModUpdatesOnLaunch,
             defaultGuestMode = prefs.defaultGuestMode,
             preferAnonymousDownloads = prefs.preferAnonymousDownloads,
             allowAuthenticatedDownloadFallback = prefs.allowAuthenticatedDownloadFallback,
@@ -720,8 +873,17 @@ class SettingsViewModel @Inject constructor(
             cdnPoolPreference = prefs.cdnPoolPreference.name,
             downloadPerformanceMode = prefs.downloadPerformanceMode.name,
             requestedChunkConcurrency = prefs.downloadChunkConcurrency,
+            primordialReducedMemoryProtectionEnabled = prefs.primordialReducedMemoryProtectionEnabled,
+            primordialAuthenticatedAggressiveCdnEnabled = prefs.primordialAuthenticatedAggressiveCdnEnabled,
             workshopPageSize = prefs.workshopPageSize,
             workshopAutoResolveVisibleItems = prefs.workshopAutoResolveVisibleItems,
+            animatedWorkshopPreviewEnabled = prefs.animatedWorkshopPreviewEnabled,
+            terrariaArchivePostProcessorEnabled = prefs.terrariaArchivePostProcessorEnabled,
+            terrariaArchiveKeepOriginal = prefs.terrariaArchiveKeepOriginal,
+            wallpaperEnginePkgExtractEnabled = prefs.wallpaperEnginePkgExtractEnabled,
+            wallpaperEnginePkgKeepOriginal = prefs.wallpaperEnginePkgKeepOriginal,
+            wallpaperEngineTexConversionEnabled = prefs.wallpaperEngineTexConversionEnabled,
+            wallpaperEngineKeepConvertedTexOriginal = prefs.wallpaperEngineKeepConvertedTexOriginal,
             hasCustomDownloadTree = !prefs.downloadTreeUri.isNullOrBlank(),
             hasCustomDownloadFolderName = prefs.downloadFolderName != DEFAULT_DOWNLOAD_FOLDER_NAME,
         )
@@ -799,6 +961,8 @@ class SettingsViewModel @Inject constructor(
             destinationType = task.exportDestinationType(),
             hasSavedFile = !task.savedFileUri.isNullOrBlank(),
             savedFileScheme = savedFileScheme,
+            savedRelativePath = task.savedRelativePath,
+            postProcessSummary = task.postProcessSummary,
             hasTargetTree = !task.targetTreeUri.isNullOrBlank(),
             storageRootKind = task.exportStorageRootKind(),
             runtimeRouteLabel = task.runtimeRouteLabel,

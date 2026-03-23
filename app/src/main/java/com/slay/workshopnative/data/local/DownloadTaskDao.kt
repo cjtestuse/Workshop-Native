@@ -22,6 +22,15 @@ interface DownloadTaskDao {
 
     @Query(
         """
+        SELECT * FROM download_tasks
+        WHERE status = 'Success'
+        ORDER BY createdAt DESC
+        """,
+    )
+    suspend fun getSuccessfulTasks(): List<DownloadTaskEntity>
+
+    @Query(
+        """
         DELETE FROM download_tasks
         WHERE status NOT IN ('Queued', 'Running', 'Paused')
         """,
@@ -186,6 +195,38 @@ interface DownloadTaskDao {
     @Query(
         """
         UPDATE download_tasks
+        SET lastUpdateCheckAt = :lastUpdateCheckAt,
+            hasUpdateAvailable = :hasUpdateAvailable,
+            updateCheckError = :updateCheckError
+        WHERE taskId = :taskId
+        """,
+    )
+    suspend fun updateUpdateCheckState(
+        taskId: String,
+        lastUpdateCheckAt: Long,
+        hasUpdateAvailable: Boolean,
+        updateCheckError: String?,
+    )
+
+    @Query(
+        """
+        UPDATE download_tasks
+        SET remoteUpdatedAt = :remoteUpdatedAt,
+            lastUpdateCheckAt = NULL,
+            hasUpdateAvailable = 0,
+            updateCheckError = NULL
+        WHERE publishedFileId = :publishedFileId
+          AND status = 'Success'
+        """,
+    )
+    suspend fun primeUpdateCheckBaseline(
+        publishedFileId: Long,
+        remoteUpdatedAt: Long?,
+    )
+
+    @Query(
+        """
+        UPDATE download_tasks
         SET status = :status,
             pauseRequested = 0,
             sourceUrl = CASE
@@ -201,6 +242,8 @@ interface DownloadTaskDao {
             runtimeSourceAddress = NULL,
             runtimeLastFailure = NULL,
             savedFileUri = :savedFileUri,
+            savedRelativePath = :savedRelativePath,
+            postProcessSummary = :postProcessSummary,
             errorMessage = :errorMessage,
             progressPercent = :progressPercent,
             bytesDownloaded = :bytesDownloaded,
@@ -213,6 +256,8 @@ interface DownloadTaskDao {
         taskId: String,
         status: DownloadStatus,
         savedFileUri: String?,
+        savedRelativePath: String?,
+        postProcessSummary: String?,
         errorMessage: String?,
         progressPercent: Int,
         bytesDownloaded: Long,

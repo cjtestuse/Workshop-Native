@@ -343,7 +343,7 @@ class ExploreViewModel @Inject constructor(
                         it.copy(
                             isLoading = false,
                             searchResults = emptyList(),
-                            errorMessage = error.toUserMessage("搜索工坊游戏失败"),
+                            errorMessage = error.toUserMessage("搜索 Steam 游戏失败"),
                         )
                     }
                 }

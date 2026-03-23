@@ -132,6 +132,11 @@ fun SettingsScreen(
         ?.let { destinationName -> SettingsDestination.entries.firstOrNull { it.name == destinationName } }
     val settingsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showLoginRiskDialog by remember { mutableStateOf(false) }
+    var pendingPerformanceMode by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingReducedMemoryProtection by rememberSaveable { mutableStateOf(false) }
+    var pendingAuthenticatedAggressiveCdn by rememberSaveable { mutableStateOf(false) }
+    val primordialPerformanceMode = pendingPerformanceMode
+        ?.let { modeName -> runCatching { DownloadPerformanceMode.valueOf(modeName) }.getOrNull() }
     val openExternalUrl: (String) -> Unit = { url ->
         if (!context.openUrlWithChooser(url, chooserTitle = "选择浏览器")) {
             Toast.makeText(context, "未找到可打开链接的浏览器", Toast.LENGTH_SHORT).show()
@@ -316,6 +321,18 @@ fun SettingsScreen(
                         title = "下载策略",
                         summary = buildString {
                             append(uiState.downloadPerformanceMode.performanceLabel())
+                            if (
+                                uiState.downloadPerformanceMode == DownloadPerformanceMode.Primordial &&
+                                uiState.primordialReducedMemoryProtectionEnabled
+                            ) {
+                                append("+放松保护")
+                            }
+                            if (
+                                uiState.downloadPerformanceMode == DownloadPerformanceMode.Primordial &&
+                                uiState.primordialAuthenticatedAggressiveCdnEnabled
+                            ) {
+                                append("+账户激进")
+                            }
                             append(" · ")
                             append(
                                 when {
@@ -337,6 +354,35 @@ fun SettingsScreen(
                             append("${uiState.workshopPageSize} / 页")
                             append(" · ")
                             append(if (uiState.workshopAutoResolveVisibleItems) "列表预读已开" else "列表预读已关")
+                            append(" · ")
+                            append(if (uiState.autoCheckDownloadedModUpdatesOnLaunch) "启动检查已开" else "启动检查已关")
+                            append(" · ")
+                            append(if (uiState.animatedWorkshopPreviewEnabled) "动态预览已开" else "动态预览已关")
+                            append(" · ")
+                            append(
+                                if (uiState.terrariaArchivePostProcessorEnabled) {
+                                    if (uiState.terrariaArchiveKeepOriginal) "Terraria压缩+保留原目录"
+                                    else "Terraria压缩已开"
+                                } else {
+                                    "Terraria压缩已关"
+                                },
+                            )
+                            append(" · ")
+                            append(
+                                if (uiState.wallpaperEnginePkgExtractEnabled) {
+                                    buildString {
+                                        append("WE提取")
+                                        if (uiState.wallpaperEngineTexConversionEnabled) {
+                                            append("+转图")
+                                        }
+                                        if (uiState.wallpaperEnginePkgKeepOriginal) {
+                                            append("+保留原目录")
+                                        }
+                                    }
+                                } else {
+                                    "WE提取已关"
+                                },
+                            )
                         },
                         onClick = { activeDestinationName = SettingsDestination.Workshop.name },
                     )
@@ -460,7 +506,29 @@ fun SettingsScreen(
 
                     SettingsDestination.DownloadStrategy -> DownloadStrategyContent(
                         uiState = uiState,
-                        onPerformanceModeSelect = viewModel::saveDownloadPerformanceMode,
+                        onPerformanceModeSelect = { mode ->
+                            if (mode == DownloadPerformanceMode.Primordial &&
+                                uiState.downloadPerformanceMode != DownloadPerformanceMode.Primordial
+                            ) {
+                                pendingPerformanceMode = mode.name
+                            } else {
+                                viewModel.saveDownloadPerformanceMode(mode)
+                            }
+                        },
+                        onToggleReducedMemoryProtection = { enabled ->
+                            if (enabled && !uiState.primordialReducedMemoryProtectionEnabled) {
+                                pendingReducedMemoryProtection = true
+                            } else {
+                                viewModel.savePrimordialReducedMemoryProtectionEnabled(enabled)
+                            }
+                        },
+                        onToggleAuthenticatedAggressiveCdn = { enabled ->
+                            if (enabled && !uiState.primordialAuthenticatedAggressiveCdnEnabled) {
+                                pendingAuthenticatedAggressiveCdn = true
+                            } else {
+                                viewModel.savePrimordialAuthenticatedAggressiveCdnEnabled(enabled)
+                            }
+                        },
                         onTogglePreferAnonymous = viewModel::savePreferAnonymousDownloads,
                         onToggleAllowAuthenticatedFallback = viewModel::saveAllowAuthenticatedDownloadFallback,
                         onCdnTransportSelect = viewModel::saveCdnTransportPreference,
@@ -471,6 +539,14 @@ fun SettingsScreen(
                         uiState = uiState,
                         onPageSizeSelect = viewModel::saveWorkshopPageSize,
                         onToggleAutoResolve = viewModel::saveWorkshopAutoResolveVisibleItems,
+                        onToggleAutoCheckDownloadedModUpdatesOnLaunch = viewModel::saveAutoCheckDownloadedModUpdatesOnLaunch,
+                        onToggleAnimatedPreview = viewModel::saveAnimatedWorkshopPreviewEnabled,
+                        onToggleTerrariaArchivePostProcessorEnabled = viewModel::saveTerrariaArchivePostProcessorEnabled,
+                        onToggleTerrariaArchiveKeepOriginal = viewModel::saveTerrariaArchiveKeepOriginal,
+                        onToggleWallpaperEnginePkgExtractEnabled = viewModel::saveWallpaperEnginePkgExtractEnabled,
+                        onToggleWallpaperEnginePkgKeepOriginal = viewModel::saveWallpaperEnginePkgKeepOriginal,
+                        onToggleWallpaperEngineTexConversionEnabled = viewModel::saveWallpaperEngineTexConversionEnabled,
+                        onToggleWallpaperEngineKeepConvertedTexOriginal = viewModel::saveWallpaperEngineKeepConvertedTexOriginal,
                     )
 
                     SettingsDestination.Translation -> TranslationSettingsContent(
@@ -540,6 +616,129 @@ fun SettingsScreen(
             text = {
                 Text(
                     text = "非官方客户端，存在账号风险，不建议主账号使用，建议保持匿名",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            shape = RoundedCornerShape(28.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+        )
+    }
+
+    if (primordialPerformanceMode == DownloadPerformanceMode.Primordial) {
+        AlertDialog(
+            onDismissRequest = { pendingPerformanceMode = null },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingPerformanceMode = null
+                        viewModel.saveDownloadPerformanceMode(DownloadPerformanceMode.Primordial)
+                    },
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text("仍然开启")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { pendingPerformanceMode = null },
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text("保持当前模式")
+                }
+            },
+            title = {
+                Text(
+                    text = "开启洪荒模式前请确认风险",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+            text = {
+                Text(
+                    text = "洪荒模式会明显提高分块并发和 CDN 节点激进度。高带宽设备可能更快，但也更容易带来发热、耗电、掉登录、下载抖动、Steam 限流或任务失败。只建议在高内存设备和稳定网络下临时使用。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            shape = RoundedCornerShape(28.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+        )
+    }
+
+    if (pendingReducedMemoryProtection) {
+        AlertDialog(
+            onDismissRequest = { pendingReducedMemoryProtection = false },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingReducedMemoryProtection = false
+                        viewModel.savePrimordialReducedMemoryProtectionEnabled(true)
+                    },
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text("仍然开启")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { pendingReducedMemoryProtection = false },
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text("保持关闭")
+                }
+            },
+            title = {
+                Text(
+                    text = "开启降低内存保护强度前请确认风险",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+            text = {
+                Text(
+                    text = "这个开关只对洪荒模式生效，会进一步放宽分块并发与 CDN 路由的收紧阈值。高内存设备可能更容易逼近满速，但也更容易出现发热、卡顿、OOM、掉登录、限流和下载失败。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            },
+            shape = RoundedCornerShape(28.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+        )
+    }
+
+    if (pendingAuthenticatedAggressiveCdn) {
+        AlertDialog(
+            onDismissRequest = { pendingAuthenticatedAggressiveCdn = false },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingAuthenticatedAggressiveCdn = false
+                        viewModel.savePrimordialAuthenticatedAggressiveCdnEnabled(true)
+                    },
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text("仍然开启")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { pendingAuthenticatedAggressiveCdn = false },
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text("保持关闭")
+                }
+            },
+            title = {
+                Text(
+                    text = "开启账户激进 CDN 策略前请确认风险",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+            text = {
+                Text(
+                    text = "这个开关只对洪荒模式下的已登录下载生效，会更激进地并行获取内容访问、扩大首批 CDN 竞速范围，并预热首批 host 的访问 token。速度可能更高，但也更容易遇到 Steam 限流、掉登录、AccessDenied 或失败重试。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1346,6 +1545,8 @@ private fun DownloadLocationContent(
 private fun DownloadStrategyContent(
     uiState: SettingsUiState,
     onPerformanceModeSelect: (DownloadPerformanceMode) -> Unit,
+    onToggleReducedMemoryProtection: (Boolean) -> Unit,
+    onToggleAuthenticatedAggressiveCdn: (Boolean) -> Unit,
     onTogglePreferAnonymous: (Boolean) -> Unit,
     onToggleAllowAuthenticatedFallback: (Boolean) -> Unit,
     onCdnTransportSelect: (CdnTransportPreference) -> Unit,
@@ -1370,6 +1571,42 @@ private fun DownloadStrategyContent(
         }
     }
     SettingsInlineHint(text = uiState.downloadPerformanceMode.performanceDescription())
+    if (uiState.downloadPerformanceMode == DownloadPerformanceMode.Primordial) {
+        SettingsInlineHint(
+            text = "建议只在高内存设备和稳定网络下临时使用。若遇到发热、速度抖动、掉登录或失败增多，请立即切回自动高性能。",
+        )
+        SettingsBooleanRow(
+            title = "降低内存保护强度（实验性）",
+            description = "仅对洪荒模式生效。会更激进地放宽并发收紧阈值和节点上限，更容易逼近链路上限，但也更容易带来发热、卡顿、闪退或下载失败。",
+            checked = uiState.primordialReducedMemoryProtectionEnabled,
+            onCheckedChange = onToggleReducedMemoryProtection,
+        )
+        SettingsInlineHint(
+            text = if (uiState.primordialReducedMemoryProtectionEnabled) {
+                "当前已放松洪荒模式的内存保护。诊断里会额外记录这个状态，便于后续分析速度与稳定性。"
+            } else {
+                "默认关闭。建议先观察普通洪荒模式是否足够，再决定是否进一步放松保护。"
+            },
+        )
+        SettingsBooleanRow(
+            title = "已登录下载使用激进 CDN 策略（实验性）",
+            description = if (!allowLoggedInDownload) {
+                "需先在“账户行为”里打开“登录后下载”，这个开关才会生效。"
+            } else {
+                "所有模式下的匿名下载都会保留基础匿名优化；默认只有洪荒模式下的匿名下载会启用更激进的 CDN 首连和选路。打开后，已登录下载也会进入激进分支。"
+            },
+            checked = uiState.primordialAuthenticatedAggressiveCdnEnabled,
+            enabled = allowLoggedInDownload,
+            onCheckedChange = onToggleAuthenticatedAggressiveCdn,
+        )
+        SettingsInlineHint(
+            text = if (uiState.primordialAuthenticatedAggressiveCdnEnabled) {
+                "当前已对已登录下载放开激进 CDN 策略。若遇到掉登录、限流或失败增多，先关闭这个开关再观察。"
+            } else {
+                "默认关闭。这样可以把更激进的 CDN 探测先限制在匿名下载上，降低账户侧的额外风险暴露面。"
+            },
+        )
+    }
 
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
 
@@ -1443,6 +1680,14 @@ private fun WorkshopSettingsContent(
     uiState: SettingsUiState,
     onPageSizeSelect: (Int) -> Unit,
     onToggleAutoResolve: (Boolean) -> Unit,
+    onToggleAutoCheckDownloadedModUpdatesOnLaunch: (Boolean) -> Unit,
+    onToggleAnimatedPreview: (Boolean) -> Unit,
+    onToggleTerrariaArchivePostProcessorEnabled: (Boolean) -> Unit,
+    onToggleTerrariaArchiveKeepOriginal: (Boolean) -> Unit,
+    onToggleWallpaperEnginePkgExtractEnabled: (Boolean) -> Unit,
+    onToggleWallpaperEnginePkgKeepOriginal: (Boolean) -> Unit,
+    onToggleWallpaperEngineTexConversionEnabled: (Boolean) -> Unit,
+    onToggleWallpaperEngineKeepConvertedTexOriginal: (Boolean) -> Unit,
 ) {
     SettingsSubsectionTitle(
         title = "每页数量",
@@ -1470,6 +1715,116 @@ private fun WorkshopSettingsContent(
         checked = uiState.workshopAutoResolveVisibleItems,
         onCheckedChange = onToggleAutoResolve,
     )
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsBooleanRow(
+        title = "启动时检查已下载更新",
+        description = if (uiState.autoCheckDownloadedModUpdatesOnLaunch) {
+            "当前已开启。应用冷启动时会按公开工坊数据检查一次已下载条目的更新，并在发现可更新条目时弹出选择窗口。"
+        } else {
+            "当前已关闭。不会在启动时自动检查，仍可在下载中心手动检查更新。"
+        },
+        checked = uiState.autoCheckDownloadedModUpdatesOnLaunch,
+        onCheckedChange = onToggleAutoCheckDownloadedModUpdatesOnLaunch,
+    )
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsBooleanRow(
+        title = "工坊动态预览",
+        description = if (uiState.animatedWorkshopPreviewEnabled) {
+            "当前已开启。工坊列表会切到新的 GIF 动态预览逻辑，Wallpaper Engine 这类条目的缩略图会动起来。"
+        } else {
+            "当前已关闭。工坊列表继续沿用原来的静态缩略图逻辑，不会启用新的动态预览代码。"
+        },
+        checked = uiState.animatedWorkshopPreviewEnabled,
+        onCheckedChange = onToggleAnimatedPreview,
+    )
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsBooleanRow(
+        title = "Terraria 压缩导出",
+        description = if (uiState.terrariaArchivePostProcessorEnabled) {
+            "当前已开启。命中 Terraria 工坊下载时，会执行内置后处理器，并生成原名加 _Post 的压缩结果。"
+        } else {
+            "当前已关闭。Terraria 工坊下载仍然完全沿用现在的默认落盘逻辑。"
+        },
+        checked = uiState.terrariaArchivePostProcessorEnabled,
+        onCheckedChange = onToggleTerrariaArchivePostProcessorEnabled,
+    )
+
+    if (uiState.terrariaArchivePostProcessorEnabled) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+        SettingsBooleanRow(
+            title = "Terraria 压缩后保留原目录",
+            description = if (uiState.terrariaArchiveKeepOriginal) {
+                "当前已开启。后处理完成后，会导出一个 _Post 文件夹，里面同时保留原目录和压缩包。"
+            } else {
+                "当前已关闭。后处理完成后，只保留原名加 _Post 的压缩包。"
+            },
+            checked = uiState.terrariaArchiveKeepOriginal,
+            onCheckedChange = onToggleTerrariaArchiveKeepOriginal,
+        )
+    }
+
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+    SettingsBooleanRow(
+        title = "Wallpaper Engine PKG 提取",
+        description = if (uiState.wallpaperEnginePkgExtractEnabled) {
+            "当前已开启。命中 Wallpaper Engine 工坊下载且目录中包含 .pkg 时，会执行内置后处理器，并生成原名加 _Post 的提取结果。该功能不会生成手机版可导入的 .mpkg。"
+        } else {
+            "当前已关闭。Wallpaper Engine 工坊下载仍然完全沿用现在的默认落盘逻辑。该功能只会在检测到 .pkg 时额外提取，不会生成 .mpkg。"
+        },
+        checked = uiState.wallpaperEnginePkgExtractEnabled,
+        onCheckedChange = onToggleWallpaperEnginePkgExtractEnabled,
+    )
+
+    if (uiState.wallpaperEnginePkgExtractEnabled) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+        SettingsBooleanRow(
+            title = "Wallpaper Engine 提取后保留原目录",
+            description = if (uiState.wallpaperEnginePkgKeepOriginal) {
+                "当前已开启。后处理完成后，会导出一个 _Post 文件夹，里面同时保留原目录和 PKG 提取结果。"
+            } else {
+                "当前已关闭。后处理完成后，只保留原名加 _Post 的 PKG 提取结果。"
+            },
+            checked = uiState.wallpaperEnginePkgKeepOriginal,
+            onCheckedChange = onToggleWallpaperEnginePkgKeepOriginal,
+        )
+
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+        SettingsBooleanRow(
+            title = "尝试将 TEX 转为图片",
+            description = if (uiState.wallpaperEngineTexConversionEnabled) {
+                "当前已开启。命中可识别的 TEX 时，会额外尝试转换成 png、jpg 或 mp4。当前只覆盖最常见、最稳定的几类格式，不会生成 .mpkg。"
+            } else {
+                "当前已关闭。Wallpaper Engine 后处理将只提取 PKG，不再额外尝试转换 TEX。"
+            },
+            checked = uiState.wallpaperEngineTexConversionEnabled,
+            onCheckedChange = onToggleWallpaperEngineTexConversionEnabled,
+        )
+
+        if (uiState.wallpaperEngineTexConversionEnabled) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+            SettingsBooleanRow(
+                title = "转换后保留原 TEX",
+                description = if (uiState.wallpaperEngineKeepConvertedTexOriginal) {
+                    "当前已开启。转换成功后会同时保留原始 TEX，避免因部分格式暂不支持而丢失原始资源。"
+                } else {
+                    "当前已关闭。转换成功后会删除原始 TEX，只保留转换结果。"
+                },
+                checked = uiState.wallpaperEngineKeepConvertedTexOriginal,
+                onCheckedChange = onToggleWallpaperEngineKeepConvertedTexOriginal,
+            )
+        }
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -1969,6 +2324,7 @@ private fun DownloadPerformanceMode.performanceLabel(): String {
     return when (this) {
         DownloadPerformanceMode.Auto -> "自动高性能"
         DownloadPerformanceMode.Compatibility -> "兼容模式"
+        DownloadPerformanceMode.Primordial -> "洪荒模式"
     }
 }
 
@@ -1976,6 +2332,7 @@ private fun DownloadPerformanceMode.performanceDescription(): String {
     return when (this) {
         DownloadPerformanceMode.Auto -> "默认模式。会优先释放更高下载性能，但仍会按设备内存自动收紧，避免重新走回 OOM。"
         DownloadPerformanceMode.Compatibility -> "更保守地限制分块并发和连接激进度。适合旧设备，或之前出现过内存溢出的情况。"
+        DownloadPerformanceMode.Primordial -> "实验模式。会显著提高分块并发和 CDN 路由激进度，尽量逼近链路上限，但也更容易带来发热、耗电、速度抖动、掉登录或 Steam 限流。"
     }
 }
 

@@ -7,6 +7,7 @@ import android.net.NetworkCapabilities
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
 import androidx.annotation.WorkerThread
@@ -23,9 +24,15 @@ import com.slay.workshopnative.core.storage.copyLocalFileToUri
 import com.slay.workshopnative.core.storage.finalizeMediaStoreFile
 import com.slay.workshopnative.core.storage.findMediaStoreDownloadUri
 import com.slay.workshopnative.core.storage.MEDIASTORE_DOWNLOADS_URI_STRING
+import com.slay.workshopnative.core.storage.normalizeDownloadFolderName
 import com.slay.workshopnative.core.storage.openExistingMediaStoreFileOutput
 import com.slay.workshopnative.core.storage.queryUriSize
+import com.slay.workshopnative.core.storage.PlannedWorkshopExportFile
+import com.slay.workshopnative.core.storage.appendOrdinalSuffix
+import com.slay.workshopnative.core.storage.appendTimestampSuffix
+import com.slay.workshopnative.core.storage.buildWorkshopExportPlan
 import com.slay.workshopnative.core.storage.uniqueMediaStoreRootName
+import com.slay.workshopnative.core.storage.uniqueMediaStoreRootNameWithTimestampFallback
 import com.slay.workshopnative.core.storage.workshopDownloadStagingRoot
 import com.slay.workshopnative.core.util.buildAccountBindingHash
 import com.slay.workshopnative.core.util.DownloadPausedException
@@ -52,6 +59,8 @@ import com.slay.workshopnative.data.model.WorkshopBrowseTagOption
 import com.slay.workshopnative.data.model.WorkshopGameEntry
 import com.slay.workshopnative.data.model.WorkshopGamePage
 import com.slay.workshopnative.data.model.WorkshopItem
+import com.slay.workshopnative.data.postprocess.WorkshopDownloadPostProcessorRegistry
+import com.slay.workshopnative.data.postprocess.WorkshopDownloadPostProcessorSelection
 import com.slay.workshopnative.data.preferences.CdnPoolPreference
 import com.slay.workshopnative.data.preferences.CdnTransportPreference
 import com.slay.workshopnative.data.preferences.DownloadPerformanceMode
@@ -126,6 +135,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -170,6 +180,7 @@ class SteamSessionManager @Inject constructor(
     private val json: Json,
     private val preferencesStore: UserPreferencesStore,
     private val supportDiagnosticsStore: SupportDiagnosticsStore,
+    private val workshopDownloadPostProcessorRegistry: WorkshopDownloadPostProcessorRegistry,
 ) {
     companion object {
         private const val LOG_TAG = "SteamSessionManager"
@@ -186,6 +197,10 @@ class SteamSessionManager @Inject constructor(
         private const val CDN_SERVER_LIST_CACHE_MS = 10 * 60 * 1000L
         private const val ANONYMOUS_CONTENT_SESSION_IDLE_MS = 60 * 60 * 1000L
         private const val ANONYMOUS_PREWARM_COOLDOWN_MS = 10 * 60 * 1000L
+        private const val ANONYMOUS_PREWARM_TOTAL_BUDGET_MS = 8_000L
+        private const val ANONYMOUS_PREWARM_SEEDED_TIMEOUT_MS = 3_500L
+        private const val ANONYMOUS_PREWARM_DIRECTORY_TIMEOUT_MS = 5_000L
+        private const val ANONYMOUS_SEEDED_TIMEOUT_MS = 6_000L
         private const val INTERACTIVE_LOGIN_RECOVERY_ATTEMPTS = 3
         private const val FOREGROUND_RECOVERY_DEBOUNCE_MS = 1_500L
         private const val DOWNLOAD_AUTH_RESTORE_TIMEOUT_MS = 30_000L
@@ -207,10 +222,10 @@ class SteamSessionManager @Inject constructor(
         private const val MAX_CDN_SERVER_ATTEMPTS_PER_TRANSPORT = 4
         private const val STEAM_COMMUNITY_URL = "https://steamcommunity.com/workshop/browse/"
         private const val STEAM_WORKSHOP_HOME_URL = "https://steamcommunity.com/workshop/"
-        private const val STEAM_WORKSHOP_SEARCH_URL = "https://steamcommunity.com/workshop/ajaxfindworkshops/"
         private const val STEAM_WORKSHOP_EXPLORE_AJAX_URL = "https://steamcommunity.com/sharedfiles/ajaxgetworkshops/"
         private const val WORKSHOP_EXPLORE_PAGE_SIZE = 8
         private const val STEAM_STORE_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
+        private const val STEAM_STORE_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
         private const val STEAM_PUBLISHED_FILE_DETAILS_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
         private const val WORKSHOP_USER_FILES_TYPE_SUBSCRIPTIONS = "mysubscriptions"
         private const val LOCAL_ROOT_REF_PREFIX = "local:"
@@ -304,6 +319,7 @@ class SteamSessionManager @Inject constructor(
     )
 
     private data class WorkshopContentAccess(
+        val authMode: DownloadAuthMode,
         val depotKey: ByteArray,
         val servers: List<Server>,
         val manifestRequestCode: Long,
@@ -323,6 +339,9 @@ class SteamSessionManager @Inject constructor(
     private data class WorkshopDetailPageContent(
         val title: String = "",
         val description: String = "",
+        val authorName: String = "",
+        val authorProfileUrl: String? = null,
+        val creatorSteamId: Long = 0L,
     )
 
     private class AuthSessionInterruptedException(
@@ -335,17 +354,43 @@ class SteamSessionManager @Inject constructor(
         private val failureCount = AtomicLong(0L)
         private val sampledBytes = AtomicLong(0L)
         private val sampledNanos = AtomicLong(0L)
+        private val chunkSampledBytes = AtomicLong(0L)
+        private val chunkSampledNanos = AtomicLong(0L)
+        private val manifestSampleCount = AtomicLong(0L)
+        private val manifestSampleNanos = AtomicLong(0L)
 
         fun beginRequest() {
             activeRequests.incrementAndGet()
         }
 
-        fun finishSuccess(sampleBytesCount: Long, durationNanos: Long) {
+        fun finishManifestSuccess(durationNanos: Long) {
             activeRequests.decrementAndGet()
+            recordTotalSample(256L * 1024L, durationNanos)
+            if (durationNanos > 0L) {
+                manifestSampleCount.incrementAndGet()
+                manifestSampleNanos.addAndGet(durationNanos)
+            }
+            decayFailureCount()
+        }
+
+        fun finishChunkSuccess(sampleBytesCount: Long, durationNanos: Long) {
+            activeRequests.decrementAndGet()
+            recordTotalSample(sampleBytesCount, durationNanos)
+            if (sampleBytesCount > 0L && durationNanos > 0L) {
+                chunkSampledBytes.addAndGet(sampleBytesCount)
+                chunkSampledNanos.addAndGet(durationNanos)
+            }
+            decayFailureCount()
+        }
+
+        private fun recordTotalSample(sampleBytesCount: Long, durationNanos: Long) {
             if (sampleBytesCount > 0L && durationNanos > 0L) {
                 sampledBytes.addAndGet(sampleBytesCount)
                 sampledNanos.addAndGet(durationNanos)
             }
+        }
+
+        private fun decayFailureCount() {
             while (true) {
                 val current = failureCount.get()
                 if (current <= 0L) break
@@ -370,11 +415,29 @@ class SteamSessionManager @Inject constructor(
 
         fun hasSamples(): Boolean = sampledBytes.get() > 0L && sampledNanos.get() > 0L
 
+        fun hasChunkSamples(): Boolean = chunkSampledBytes.get() > 0L && chunkSampledNanos.get() > 0L
+
+        fun hasManifestSamples(): Boolean = manifestSampleCount.get() > 0L && manifestSampleNanos.get() > 0L
+
         fun averageNanosPerMiB(): Long {
             val bytes = sampledBytes.get()
             val nanos = sampledNanos.get()
             if (bytes <= 0L || nanos <= 0L) return Long.MAX_VALUE
             return (nanos * 1024L * 1024L) / bytes.coerceAtLeast(1L)
+        }
+
+        fun averageChunkNanosPerMiB(): Long {
+            val bytes = chunkSampledBytes.get()
+            val nanos = chunkSampledNanos.get()
+            if (bytes <= 0L || nanos <= 0L) return Long.MAX_VALUE
+            return (nanos * 1024L * 1024L) / bytes.coerceAtLeast(1L)
+        }
+
+        fun averageManifestNanos(): Long {
+            val count = manifestSampleCount.get()
+            val nanos = manifestSampleNanos.get()
+            if (count <= 0L || nanos <= 0L) return Long.MAX_VALUE
+            return nanos / count.coerceAtLeast(1L)
         }
     }
 
@@ -424,6 +487,7 @@ class SteamSessionManager @Inject constructor(
 
     private data class DownloadPerformanceProfile(
         val mode: DownloadPerformanceMode,
+        val reducedMemoryProtectionEnabled: Boolean,
         val requestedChunkConcurrency: Int,
         val chunkConcurrency: Int,
         val maxRoutesPerTransport: Int,
@@ -433,6 +497,15 @@ class SteamSessionManager @Inject constructor(
         val heapBudgetMb: Int,
         val availableHeapMb: Int,
         val isLowRamDevice: Boolean,
+    )
+
+    private data class CdnExecutionProfile(
+        val aggressiveEnabled: Boolean,
+        val maxRoutesPerTransport: Int,
+        val maxActiveRoutes: Int,
+        val manifestRaceRouteCount: Int,
+        val authTokenPrewarmCount: Int,
+        val preferChunkAwareSelection: Boolean,
     )
 
     private class AnonymousContentSession(
@@ -501,6 +574,7 @@ class SteamSessionManager @Inject constructor(
     private var anonymousCdnServersCache: CachedValue<List<Server>>? = null
     private var anonymousContentSession: AnonymousContentSession? = null
     private var anonymousPrewarmInFlight = false
+    private var anonymousPrewarmJob: Job? = null
     private var lastAnonymousPrewarmAtMs = 0L
     private var appInForeground = true
     private var pendingForegroundRecovery = false
@@ -930,7 +1004,8 @@ class SteamSessionManager @Inject constructor(
     }
 
     fun prewarmAnonymousDownloadAccess() {
-        appScope.launch {
+        val prewarmJob = appScope.launch {
+            anonymousPrewarmJob = coroutineContext[Job]
             val shouldRun = anonymousContentSessionMutex.withLock {
                 val now = System.currentTimeMillis()
                 if (
@@ -954,8 +1029,12 @@ class SteamSessionManager @Inject constructor(
             }
             anonymousContentSessionMutex.withLock {
                 anonymousPrewarmInFlight = false
+                if (anonymousPrewarmJob == coroutineContext[Job]) {
+                    anonymousPrewarmJob = null
+                }
             }
         }
+        anonymousPrewarmJob = prewarmJob
     }
 
     suspend fun logout() = withContext(Dispatchers.IO) {
@@ -1218,28 +1297,38 @@ class SteamSessionManager @Inject constructor(
             ?.let { cached -> return@withContext cached.value }
 
         val request = Request.Builder()
-            .url("$STEAM_WORKSHOP_SEARCH_URL?searchText=${Uri.encode(normalizedQuery)}")
+            .url(
+                STEAM_STORE_SEARCH_URL.toHttpUrl().newBuilder()
+                    .addQueryParameter("term", normalizedQuery)
+                    .addQueryParameter("l", "schinese")
+                    .addQueryParameter("cc", "CN")
+                    .build(),
+            )
             .header("User-Agent", "Mozilla/5.0")
             .get()
             .build()
         val payload = okHttpClient.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "搜索公开工坊游戏失败：HTTP ${response.code}" }
+            check(response.isSuccessful) { "搜索 Steam 游戏失败：HTTP ${response.code}" }
             response.body?.string().orEmpty()
         }
 
         val results = runCatching {
-            json.decodeFromString<List<WorkshopSearchGameDto>>(payload)
-        }.getOrDefault(emptyList())
+            json.decodeFromString<StoreSearchResponse>(payload)
+        }.getOrDefault(StoreSearchResponse())
+            .items
+            .asSequence()
+            .filter { it.type.equals("app", ignoreCase = true) }
             .map { dto ->
                 WorkshopGameEntry(
-                    appId = dto.appId,
+                    appId = dto.id,
                     name = dto.name,
-                    capsuleUrl = dto.logo,
-                    previewUrl = dto.icon,
+                    capsuleUrl = dto.tinyImage,
+                    previewUrl = null,
                     workshopItemCount = null,
                 )
             }
             .distinctBy(WorkshopGameEntry::appId)
+            .toList()
 
         workshopGameSearchCache[cacheKey] = CachedValue(results)
         return@withContext results
@@ -1270,6 +1359,9 @@ class SteamSessionManager @Inject constructor(
         val html = runCatching {
             okHttpClient.newCall(request).execute().use { response ->
                 check(response.isSuccessful) { "Steam 创意工坊页面请求失败：HTTP ${response.code}" }
+                if (isWorkshopUnavailableRedirect(response.request.url)) {
+                    error("该游戏当前没有开放 Steam 创意工坊")
+                }
                 response.body?.string().orEmpty()
             }
         }.getOrElse { throwable ->
@@ -1442,6 +1534,19 @@ class SteamSessionManager @Inject constructor(
             ?: error("未找到该创意工坊条目")
     }
 
+    suspend fun resolveWorkshopItemForDetails(publishedFileId: Long): WorkshopItem = withContext(Dispatchers.IO) {
+        Log.d(LOG_TAG, "resolveWorkshopItemForDetails publishedFileId=$publishedFileId")
+        val baseItem = resolveWorkshopItem(publishedFileId)
+        if (!baseItem.needsWorkshopDetailPageEnrichmentForDetails()) {
+            return@withContext baseItem
+        }
+        val enrichedItem = loadWorkshopDetailPageContent(baseItem)
+            ?.let { detailPage -> baseItem.mergeWorkshopDetailPage(detailPage) }
+            ?: baseItem
+        workshopItemCache[enrichedItem.publishedFileId] = CachedValue(enrichedItem)
+        enrichedItem
+    }
+
     suspend fun resolveWorkshopItems(publishedFileIds: Collection<Long>): List<WorkshopItem> = withContext(Dispatchers.IO) {
         val normalizedIds = publishedFileIds
             .filter { it > 0L }
@@ -1559,7 +1664,7 @@ class SteamSessionManager @Inject constructor(
             chunkConcurrency: Int?,
             lastFailure: String?,
         ) -> Unit = { _, _, _, _, _, _, _ -> },
-    ): String = withContext(Dispatchers.IO) {
+    ): WorkshopExportResult = withContext(Dispatchers.IO) {
         Log.i(
             LOG_TAG,
             "downloadWorkshopItem publishedFileId=${item.publishedFileId} appId=${item.appId} manifest=${item.contentManifestId} direct=${item.canDirectDownload} authMode=$downloadAuthMode",
@@ -1640,7 +1745,13 @@ class SteamSessionManager @Inject constructor(
                 "sessionConnected" to isConnected.toString(),
                 "sessionClientReady" to (steamClient != null && steamApps != null && steamContent != null).toString(),
                 "recoveryInProgress" to (recoveryJob?.isActive == true || _sessionState.value.isRestoring).toString(),
+                "primordialReducedMemoryProtectionEnabled" to prefs.primordialReducedMemoryProtectionEnabled.toString(),
+                "primordialAuthenticatedAggressiveCdnEnabled" to prefs.primordialAuthenticatedAggressiveCdnEnabled.toString(),
             ),
+        )
+        val postProcessorSelection = workshopDownloadPostProcessorRegistry.resolveSelection(
+            appId = appId,
+            prefs = prefs,
         )
 
         val storageRoot = createWorkshopStorageRoot(
@@ -1649,15 +1760,17 @@ class SteamSessionManager @Inject constructor(
             treeUri = targetTreeUri,
             downloadFolderName = downloadFolderName,
             existingRootRef = existingRootRef,
+            postProcessorSelection = postProcessorSelection,
         )
         val performanceProfile = effectiveDownloadPerformanceProfile(
             requested = normalizeDownloadChunkConcurrency(prefs.downloadChunkConcurrency),
             mode = prefs.downloadPerformanceMode,
+            reducedMemoryProtectionEnabled = prefs.primordialReducedMemoryProtectionEnabled,
         )
         if (performanceProfile.chunkConcurrency < performanceProfile.requestedChunkConcurrency) {
             Log.w(
                 LOG_TAG,
-                "downloadWorkshopItem clamp chunk concurrency requested=${performanceProfile.requestedChunkConcurrency} effective=${performanceProfile.chunkConcurrency} mode=${performanceProfile.mode} heapBudgetMb=${performanceProfile.heapBudgetMb} availableHeapMb=${performanceProfile.availableHeapMb} lowRam=${performanceProfile.isLowRamDevice}",
+                "downloadWorkshopItem clamp chunk concurrency requested=${performanceProfile.requestedChunkConcurrency} effective=${performanceProfile.chunkConcurrency} mode=${performanceProfile.mode} reducedProtection=${performanceProfile.reducedMemoryProtectionEnabled} heapBudgetMb=${performanceProfile.heapBudgetMb} availableHeapMb=${performanceProfile.availableHeapMb} lowRam=${performanceProfile.isLowRamDevice}",
             )
         }
         supportDiagnosticsStore.recordPerformanceSnapshot(
@@ -1665,6 +1778,8 @@ class SteamSessionManager @Inject constructor(
                 taskId = stagingTaskId,
                 timestampMs = System.currentTimeMillis(),
                 mode = performanceProfile.mode.name,
+                reducedMemoryProtectionEnabled = performanceProfile.reducedMemoryProtectionEnabled,
+                authenticatedAggressiveCdnEnabled = prefs.primordialAuthenticatedAggressiveCdnEnabled,
                 requestedChunkConcurrency = performanceProfile.requestedChunkConcurrency,
                 effectiveChunkConcurrency = performanceProfile.chunkConcurrency,
                 maxRoutesPerTransport = performanceProfile.maxRoutesPerTransport,
@@ -1674,12 +1789,16 @@ class SteamSessionManager @Inject constructor(
                         (performanceProfile.chunkConcurrency * 2).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
                     DownloadPerformanceMode.Compatibility ->
                         (performanceProfile.chunkConcurrency + 1).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
+                    DownloadPerformanceMode.Primordial ->
+                        (performanceProfile.chunkConcurrency * 3).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
                 },
                 dispatcherMaxRequestsPerHost = when (performanceProfile.mode) {
                     DownloadPerformanceMode.Auto ->
                         (performanceProfile.chunkConcurrency + 2).coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
                     DownloadPerformanceMode.Compatibility ->
                         performanceProfile.chunkConcurrency.coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
+                    DownloadPerformanceMode.Primordial ->
+                        (performanceProfile.chunkConcurrency + 4).coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
                 },
                 heapBudgetMb = performanceProfile.heapBudgetMb,
                 availableHeapMb = performanceProfile.availableHeapMb,
@@ -1719,6 +1838,7 @@ class SteamSessionManager @Inject constructor(
                     performanceProfile = performanceProfile,
                     transportModes = transportModes,
                     cdnPoolPreference = prefs.cdnPoolPreference,
+                    authenticatedAggressiveCdnEnabled = prefs.primordialAuthenticatedAggressiveCdnEnabled,
                     shouldPause = shouldPause,
                     onProgress = onProgress,
                     onRuntimeInfoChanged = onRuntimeInfoChanged,
@@ -1767,6 +1887,7 @@ class SteamSessionManager @Inject constructor(
                     performanceProfile = performanceProfile,
                     transportModes = transportModes,
                     cdnPoolPreference = prefs.cdnPoolPreference,
+                    authenticatedAggressiveCdnEnabled = prefs.primordialAuthenticatedAggressiveCdnEnabled,
                     shouldPause = shouldPause,
                     onProgress = onProgress,
                     onRuntimeInfoChanged = onRuntimeInfoChanged,
@@ -1812,6 +1933,7 @@ class SteamSessionManager @Inject constructor(
                     performanceProfile = performanceProfile,
                     transportModes = transportModes,
                     cdnPoolPreference = prefs.cdnPoolPreference,
+                    authenticatedAggressiveCdnEnabled = prefs.primordialAuthenticatedAggressiveCdnEnabled,
                     shouldPause = shouldPause,
                     onProgress = onProgress,
                     onRuntimeInfoChanged = onRuntimeInfoChanged,
@@ -2144,6 +2266,7 @@ class SteamSessionManager @Inject constructor(
         storageRoot: WorkshopStorageRoot,
         chunkPrefetchCount: Int,
         maxActiveRoutes: Int,
+        preferChunkAwareSelection: Boolean,
         shouldPause: suspend () -> Boolean,
         onProgress: suspend (Long, Long) -> Unit,
     ) {
@@ -2221,6 +2344,7 @@ class SteamSessionManager @Inject constructor(
                                             depotKey,
                                             routes,
                                             maxActiveRoutes,
+                                            preferChunkAwareSelection,
                                             shouldPause,
                                         )
                                     }
@@ -2290,6 +2414,49 @@ class SteamSessionManager @Inject constructor(
             }
     }
 
+    private fun resolveCdnExecutionProfile(
+        performanceProfile: DownloadPerformanceProfile,
+        contentAccess: WorkshopContentAccess,
+        authenticatedAggressiveEnabled: Boolean,
+    ): CdnExecutionProfile {
+        val aggressiveEnabled = when {
+            performanceProfile.mode != DownloadPerformanceMode.Primordial -> false
+            contentAccess.authMode == DownloadAuthMode.Anonymous -> true
+            else -> authenticatedAggressiveEnabled
+        }
+        return if (aggressiveEnabled) {
+            CdnExecutionProfile(
+                aggressiveEnabled = true,
+                maxRoutesPerTransport = performanceProfile.maxRoutesPerTransport,
+                maxActiveRoutes = performanceProfile.maxActiveRoutes,
+                manifestRaceRouteCount = 4,
+                authTokenPrewarmCount = if (contentAccess.authMode == DownloadAuthMode.Authenticated) 4 else 0,
+                preferChunkAwareSelection = true,
+            )
+        } else {
+            CdnExecutionProfile(
+                aggressiveEnabled = false,
+                maxRoutesPerTransport = when (contentAccess.authMode) {
+                    DownloadAuthMode.Auto,
+                    DownloadAuthMode.Authenticated ->
+                        performanceProfile.maxRoutesPerTransport.coerceAtMost(MAX_CDN_ROUTES_PER_TRANSPORT)
+                    DownloadAuthMode.Anonymous ->
+                        performanceProfile.maxRoutesPerTransport
+                },
+                maxActiveRoutes = when (contentAccess.authMode) {
+                    DownloadAuthMode.Auto,
+                    DownloadAuthMode.Authenticated ->
+                        performanceProfile.maxActiveRoutes.coerceAtMost(MAX_ACTIVE_CDN_ROUTES)
+                    DownloadAuthMode.Anonymous ->
+                        performanceProfile.maxActiveRoutes
+                },
+                manifestRaceRouteCount = CDN_MANIFEST_RACE_ROUTE_COUNT,
+                authTokenPrewarmCount = 0,
+                preferChunkAwareSelection = contentAccess.authMode == DownloadAuthMode.Anonymous,
+            )
+        }
+    }
+
     private fun buildCdnRoutes(
         transportClients: List<TransportClient>,
         servers: List<Server>,
@@ -2330,28 +2497,49 @@ class SteamSessionManager @Inject constructor(
         routes: List<CdnRoute>,
         excludedHosts: Set<String> = emptySet(),
         excludedRouteKeys: Set<String> = emptySet(),
+        preferChunkAwareSelection: Boolean = false,
     ): List<CdnRoute> {
         val now = System.currentTimeMillis()
+        val comparator = if (preferChunkAwareSelection) {
+            compareBy<CdnRoute>(
+                { cdnCooldownPriority(it.hostName, now) },
+                { if (it.performance.hasChunkSamples()) 0 else 1 },
+                { it.performance.averageChunkNanosPerMiB() },
+                { it.performance.failurePenalty() },
+                { cdnLastSuccessPriority(it.hostName) },
+                {
+                    lastSuccessfulCdnTransportDirect?.let { preferred ->
+                        if (it.forceDirect == preferred) 0 else 1
+                    } ?: 0
+                },
+                { cdnHostPriority(it.server) },
+                { cdnProtocolPriority(it.server) },
+                { if (it.performance.hasManifestSamples()) 0 else 1 },
+                { it.performance.averageManifestNanos() },
+                { it.performance.activeRequestCount() },
+                { it.rank },
+            )
+        } else {
+            compareBy<CdnRoute>(
+                { cdnCooldownPriority(it.hostName, now) },
+                { if (it.performance.hasSamples()) 0 else 1 },
+                { it.performance.averageNanosPerMiB() },
+                { it.performance.failurePenalty() },
+                { cdnLastSuccessPriority(it.hostName) },
+                {
+                    lastSuccessfulCdnTransportDirect?.let { preferred ->
+                        if (it.forceDirect == preferred) 0 else 1
+                    } ?: 0
+                },
+                { it.performance.activeRequestCount() },
+                { it.rank },
+            )
+        }
         return routes.asSequence()
             .filter { route ->
                 route.hostName !in excludedHosts && route.selectionKey !in excludedRouteKeys
             }
-            .sortedWith(
-                compareBy<CdnRoute>(
-                    { cdnCooldownPriority(it.hostName, now) },
-                    { if (it.performance.hasSamples()) 0 else 1 },
-                    { it.performance.averageNanosPerMiB() },
-                    { it.performance.failurePenalty() },
-                    { cdnLastSuccessPriority(it.hostName) },
-                    {
-                        lastSuccessfulCdnTransportDirect?.let { preferred ->
-                            if (it.forceDirect == preferred) 0 else 1
-                        } ?: 0
-                    },
-                    { it.performance.activeRequestCount() },
-                    { it.rank },
-                ),
-            )
+            .sortedWith(comparator)
             .distinctBy(CdnRoute::selectionKey)
             .toList()
     }
@@ -2368,12 +2556,14 @@ class SteamSessionManager @Inject constructor(
         excludedHosts: Set<String> = emptySet(),
         excludedRouteKeys: Set<String> = emptySet(),
         maxActiveRoutes: Int = MAX_ACTIVE_CDN_ROUTES,
+        preferChunkAwareSelection: Boolean = false,
     ): List<CdnRoute> {
         val preferredRoutes = uniqueRoutesByHost(
             selectPreferredCdnRoutes(
                 routes = routes,
                 excludedHosts = excludedHosts,
                 excludedRouteKeys = excludedRouteKeys,
+                preferChunkAwareSelection = preferChunkAwareSelection,
             ),
         )
         val effectiveLimit = maxActiveRoutes.coerceAtLeast(1)
@@ -2404,18 +2594,38 @@ class SteamSessionManager @Inject constructor(
         }
     }
 
+    private suspend fun prewarmRouteAuthTokens(
+        routes: List<CdnRoute>,
+        prewarmCount: Int,
+    ) = coroutineScope {
+        routes.take(prewarmCount.coerceAtLeast(0))
+            .map { route ->
+                async {
+                    runCatching { route.authToken() }
+                }
+            }
+            .awaitAll()
+    }
+
     private suspend fun loadManifestFromRoutes(
         taskId: String?,
         routes: List<CdnRoute>,
         depotId: Int,
         manifestId: Long,
         contentAccess: WorkshopContentAccess,
+        raceRouteCount: Int = CDN_MANIFEST_RACE_ROUTE_COUNT,
+        preferChunkAwareSelection: Boolean = false,
     ): Pair<DepotManifest, CdnRoute> = coroutineScope {
-        val preferredRoutes = uniqueRoutesByHost(selectPreferredCdnRoutes(routes))
+        val preferredRoutes = uniqueRoutesByHost(
+            selectPreferredCdnRoutes(
+                routes = routes,
+                preferChunkAwareSelection = preferChunkAwareSelection,
+            ),
+        )
         check(preferredRoutes.isNotEmpty()) { "未找到可用的 Steam CDN 路由" }
 
         val failures = mutableListOf<String>()
-        val batchSize = CDN_MANIFEST_RACE_ROUTE_COUNT.coerceAtLeast(1)
+        val batchSize = raceRouteCount.coerceAtLeast(1)
         preferredRoutes.chunked(batchSize).forEach { raceRoutes ->
             val results = Channel<ManifestProbeResult>(raceRoutes.size)
             val jobs = raceRoutes.map { route ->
@@ -2434,7 +2644,7 @@ class SteamSessionManager @Inject constructor(
                             route.authToken(),
                         ).await()
                         prepareManifest(manifest, contentAccess.depotKey)
-                        route.performance.finishSuccess(256L * 1024L, System.nanoTime() - startedAt)
+                        route.performance.finishManifestSuccess(System.nanoTime() - startedAt)
                         supportDiagnosticsStore.recordManifestRouteSuccess(taskId, route.hostName)
                         results.trySend(
                             ManifestProbeResult(
@@ -2507,6 +2717,7 @@ class SteamSessionManager @Inject constructor(
         depotKey: ByteArray,
         routes: List<CdnRoute>,
         maxActiveRoutes: Int,
+        preferChunkAwareSelection: Boolean,
         shouldPause: suspend () -> Boolean,
     ): DownloadedChunk {
         val attemptedRouteKeys = linkedSetOf<String>()
@@ -2529,6 +2740,7 @@ class SteamSessionManager @Inject constructor(
                 routes,
                 excludedRouteKeys = attemptedRouteKeys,
                 maxActiveRoutes = maxActiveRoutes,
+                preferChunkAwareSelection = preferChunkAwareSelection,
             ).firstOrNull() ?: return@repeat
             attemptedRouteKeys += route.selectionKey
             route.performance.beginRequest()
@@ -2553,7 +2765,7 @@ class SteamSessionManager @Inject constructor(
                     fileBuffer,
                     depotKey,
                 )
-                route.performance.finishSuccess(
+                route.performance.finishChunkSuccess(
                     written.toLong().coerceAtLeast(1L),
                     System.nanoTime() - startedAt,
                 )
@@ -2605,6 +2817,7 @@ class SteamSessionManager @Inject constructor(
         performanceProfile: DownloadPerformanceProfile,
         transportModes: List<Boolean>,
         cdnPoolPreference: CdnPoolPreference,
+        authenticatedAggressiveCdnEnabled: Boolean,
         shouldPause: suspend () -> Boolean,
         onProgress: suspend (Long, Long) -> Unit,
         onRuntimeInfoChanged: suspend (
@@ -2635,12 +2848,20 @@ class SteamSessionManager @Inject constructor(
             performanceProfile = performanceProfile,
         )
         try {
+            val executionProfile = resolveCdnExecutionProfile(
+                performanceProfile = performanceProfile,
+                contentAccess = contentAccess,
+                authenticatedAggressiveEnabled = authenticatedAggressiveCdnEnabled,
+            )
             val routes = buildCdnRoutes(
                 transportClients = transportClients,
                 servers = candidateServers,
                 contentAccess = contentAccess,
-                maxRoutesPerTransport = performanceProfile.maxRoutesPerTransport,
+                maxRoutesPerTransport = executionProfile.maxRoutesPerTransport,
             )
+            if (executionProfile.authTokenPrewarmCount > 0) {
+                prewarmRouteAuthTokens(routes, executionProfile.authTokenPrewarmCount)
+            }
             supportDiagnosticsStore.recordCdnTaskPlan(
                 taskId = taskId,
                 accessLabel = contentAccess.accessLabel,
@@ -2675,8 +2896,12 @@ class SteamSessionManager @Inject constructor(
                 depotId = depotId,
                 manifestId = manifestId,
                 contentAccess = contentAccess,
+                raceRouteCount = executionProfile.manifestRaceRouteCount,
+                preferChunkAwareSelection = executionProfile.preferChunkAwareSelection,
             )
-            rememberSuccessfulCdnRoute(manifestRoute)
+            if (!executionProfile.preferChunkAwareSelection) {
+                rememberSuccessfulCdnRoute(manifestRoute)
+            }
 
             downloadManifestFiles(
                 manifest = manifest,
@@ -2686,13 +2911,17 @@ class SteamSessionManager @Inject constructor(
                 storageRoot = storageRoot,
                 taskId = taskId,
                 chunkPrefetchCount = performanceProfile.chunkConcurrency,
-                maxActiveRoutes = performanceProfile.maxActiveRoutes,
+                maxActiveRoutes = executionProfile.maxActiveRoutes,
+                preferChunkAwareSelection = executionProfile.preferChunkAwareSelection,
                 shouldPause = shouldPause,
                 onProgress = onProgress,
             )
 
             rememberSuccessfulCdnRoute(
-                selectPreferredCdnRoutes(routes).firstOrNull() ?: manifestRoute,
+                selectPreferredCdnRoutes(
+                    routes = routes,
+                    preferChunkAwareSelection = executionProfile.preferChunkAwareSelection,
+                ).firstOrNull() ?: manifestRoute,
             )
             Log.i(
                 LOG_TAG,
@@ -2738,68 +2967,75 @@ class SteamSessionManager @Inject constructor(
         getCachedWorkshopContentAccess(cacheKey)?.let { cached ->
             return cached
         }
-
-        val depotKeyCallback = runDownloadStage(
-            taskId = taskId,
-            stage = "authenticated_depot_key",
-            timeoutMs = DOWNLOAD_DEPOT_KEY_TIMEOUT_MS,
-            timeoutMessage = "获取已登录下载密钥超时，请稍后重试",
-            fields = mapOf(
-                "appId" to appId.toString(),
-                "depotId" to depotId.toString(),
-                "manifestId" to manifestId.toString(),
-            ),
-        ) {
-            steamApps?.getDepotDecryptionKey(depotId, appId)?.await()
-                ?: error("无法获取 Workshop depot key")
+        val access = coroutineScope {
+            val contentHandler = steamContent ?: error("Steam content handler 不可用")
+            val depotKeyDeferred = async {
+                runDownloadStage(
+                    taskId = taskId,
+                    stage = "authenticated_depot_key",
+                    timeoutMs = DOWNLOAD_DEPOT_KEY_TIMEOUT_MS,
+                    timeoutMessage = "获取已登录下载密钥超时，请稍后重试",
+                    fields = mapOf(
+                        "appId" to appId.toString(),
+                        "depotId" to depotId.toString(),
+                        "manifestId" to manifestId.toString(),
+                    ),
+                ) {
+                    steamApps?.getDepotDecryptionKey(depotId, appId)?.await()
+                        ?: error("无法获取 Workshop depot key")
+                }
+            }
+            val serversDeferred = async {
+                loadAuthenticatedCdnServers(
+                    contentHandler = contentHandler,
+                    taskId = taskId,
+                    appId = appId,
+                    depotId = depotId,
+                    manifestId = manifestId,
+                )
+            }
+            val manifestRequestCodeDeferred = async {
+                runDownloadStage(
+                    taskId = taskId,
+                    stage = "authenticated_manifest_request",
+                    timeoutMs = DOWNLOAD_MANIFEST_REQUEST_CODE_TIMEOUT_MS,
+                    timeoutMessage = "获取 Steam manifest 访问码超时，请稍后重试",
+                    fields = mapOf(
+                        "appId" to appId.toString(),
+                        "depotId" to depotId.toString(),
+                        "manifestId" to manifestId.toString(),
+                    ),
+                ) {
+                    contentHandler.getManifestRequestCode(
+                        depotId,
+                        appId,
+                        manifestId,
+                        "public",
+                        null,
+                        appScope,
+                    ).await()
+                }
+            }
+            val depotKeyCallback = depotKeyDeferred.await()
+            check(depotKeyCallback.result == EResult.OK) { "Steam 返回 ${depotKeyCallback.result}" }
+            WorkshopContentAccess(
+                authMode = DownloadAuthMode.Authenticated,
+                depotKey = depotKeyCallback.depotKey,
+                servers = serversDeferred.await(),
+                manifestRequestCode = manifestRequestCodeDeferred.await(),
+                accessLabel = "已登录 Steam 内容",
+                allowInsecureTransport = false,
+                cdnAuthTokenProvider = { hostName ->
+                    runCatching {
+                        contentHandler.getCDNAuthToken(appId, depotId, hostName, appScope).await()
+                    }.getOrNull()
+                        ?.takeIf { it.result == EResult.OK }
+                        ?.token
+                },
+            )
         }
-        check(depotKeyCallback.result == EResult.OK) { "Steam 返回 ${depotKeyCallback.result}" }
-
-        val contentHandler = steamContent ?: error("Steam content handler 不可用")
-        val servers = loadAuthenticatedCdnServers(
-            contentHandler = contentHandler,
-            taskId = taskId,
-            appId = appId,
-            depotId = depotId,
-            manifestId = manifestId,
-        )
-
-        val manifestRequestCode = runDownloadStage(
-            taskId = taskId,
-            stage = "authenticated_manifest_request",
-            timeoutMs = DOWNLOAD_MANIFEST_REQUEST_CODE_TIMEOUT_MS,
-            timeoutMessage = "获取 Steam manifest 访问码超时，请稍后重试",
-            fields = mapOf(
-                "appId" to appId.toString(),
-                "depotId" to depotId.toString(),
-                "manifestId" to manifestId.toString(),
-            ),
-        ) {
-            contentHandler.getManifestRequestCode(
-                depotId,
-                appId,
-                manifestId,
-                "public",
-                null,
-                appScope,
-            ).await()
-        }
-
-        return WorkshopContentAccess(
-            depotKey = depotKeyCallback.depotKey,
-            servers = servers,
-            manifestRequestCode = manifestRequestCode,
-            accessLabel = "已登录 Steam 内容",
-            allowInsecureTransport = false,
-            cdnAuthTokenProvider = { hostName ->
-                runCatching {
-                    contentHandler.getCDNAuthToken(appId, depotId, hostName, appScope).await()
-                }.getOrNull()
-                    ?.takeIf { it.result == EResult.OK }
-                    ?.token
-            },
-        ).also { access ->
-            workshopContentAccessCache[cacheKey] = CachedValue(access)
+        return access.also {
+            workshopContentAccessCache[cacheKey] = CachedValue(it)
         }
     }
 
@@ -2818,6 +3054,7 @@ class SteamSessionManager @Inject constructor(
         getCachedWorkshopContentAccess(cacheKey)?.let { cached ->
             return cached
         }
+        cancelBlockingAnonymousPrewarmIfNeeded()
         var lastError: Throwable? = null
         repeat(2) { attempt ->
             val result = runCatching {
@@ -2848,6 +3085,7 @@ class SteamSessionManager @Inject constructor(
 
     private suspend fun ensureAnonymousContentSession(
         forceRecreate: Boolean = false,
+        bestEffort: Boolean = false,
     ): AnonymousContentSession = anonymousContentSessionMutex.withLock {
         val now = System.currentTimeMillis()
         val existing = anonymousContentSession
@@ -2867,7 +3105,7 @@ class SteamSessionManager @Inject constructor(
         }
 
         var lastError: Throwable? = null
-        prioritizedAnonymousConnectionProfiles().forEach { profile ->
+        anonymousConnectionProfiles(bestEffort = bestEffort).forEach { profile ->
             val result = runCatching { createAnonymousContentSession(profile) }
             if (result.isSuccess) {
                 return@withLock result.getOrThrow().also { created ->
@@ -2881,12 +3119,13 @@ class SteamSessionManager @Inject constructor(
     }
 
     private suspend fun prewarmAnonymousContentSession() {
-        if (!preferencesStore.snapshot().preferAnonymousDownloads) return
-        val session = ensureAnonymousContentSession()
-        runCatching {
-            loadAnonymousCdnServers(session)
-        }.onFailure { throwable ->
-            Log.w(LOG_TAG, "prewarmAnonymousContentSession server warmup failed", throwable)
+        withTimeout(ANONYMOUS_PREWARM_TOTAL_BUDGET_MS) {
+            val session = ensureAnonymousContentSession(bestEffort = true)
+            runCatching {
+                loadAnonymousCdnServers(session)
+            }.onFailure { throwable ->
+                Log.w(LOG_TAG, "prewarmAnonymousContentSession server warmup failed", throwable)
+            }
         }
     }
 
@@ -2898,21 +3137,29 @@ class SteamSessionManager @Inject constructor(
     ): WorkshopContentAccess = withContext(Dispatchers.IO) {
         check(session.connectionAlive.get()) { "匿名 Steam 会话已断开" }
         session.lastUsedAtMs.set(System.currentTimeMillis())
-        val depotKeyCallback = session.apps.getDepotDecryptionKey(depotId, appId).await()
+        val depotKeyDeferred = async {
+            session.apps.getDepotDecryptionKey(depotId, appId).await()
+        }
+        val serversDeferred = async {
+            loadAnonymousCdnServers(session)
+        }
+        val manifestRequestCodeDeferred = async {
+            session.content.getManifestRequestCode(
+                depotId,
+                appId,
+                manifestId,
+                "public",
+                null,
+                session.callbackScope,
+            ).await()
+        }
+        val depotKeyCallback = depotKeyDeferred.await()
         check(depotKeyCallback.result == EResult.OK) { "匿名 Steam 返回 ${depotKeyCallback.result}" }
-
-        val servers = loadAnonymousCdnServers(session)
-
-        val manifestRequestCode = session.content.getManifestRequestCode(
-            depotId,
-            appId,
-            manifestId,
-            "public",
-            null,
-            session.callbackScope,
-        ).await()
+        val servers = serversDeferred.await()
+        val manifestRequestCode = manifestRequestCodeDeferred.await()
 
         WorkshopContentAccess(
+            authMode = DownloadAuthMode.Anonymous,
             depotKey = depotKeyCallback.depotKey,
             servers = servers,
             manifestRequestCode = manifestRequestCode,
@@ -2975,7 +3222,7 @@ class SteamSessionManager @Inject constructor(
 
         try {
             localClient.connect()
-            withTimeoutOrNull(profile.connectionTimeoutMs + 5_000L) {
+            withTimeoutOrNull(anonymousConnectWaitTimeoutMs(profile)) {
                 connected.await()
             } ?: error("匿名 Steam 连接超时")
 
@@ -2986,7 +3233,7 @@ class SteamSessionManager @Inject constructor(
                     "schinese",
                 ),
             )
-            withTimeoutOrNull(15_000L) {
+            withTimeoutOrNull(anonymousLogOnWaitTimeoutMs(profile)) {
                 loggedOn.await()
             } ?: error("匿名 Steam 登录超时")
             preferredConnectionProfileLabel = profile.label
@@ -3166,10 +3413,13 @@ class SteamSessionManager @Inject constructor(
         treeUri: String?,
         downloadFolderName: String?,
         existingRootRef: String?,
+        postProcessorSelection: WorkshopDownloadPostProcessorSelection?,
     ): WorkshopStorageRoot {
         val safeRootName = sanitizeFileName(rootName, "workshop-item")
         return when {
-            existingRootRef?.startsWith(TREE_ROOT_REF_PREFIX) == true && !treeUri.isNullOrBlank() -> {
+            postProcessorSelection == null &&
+                existingRootRef?.startsWith(TREE_ROOT_REF_PREFIX) == true &&
+                !treeUri.isNullOrBlank() -> {
                 val parent = DocumentFile.fromTreeUri(appContext, Uri.parse(treeUri))
                     ?: error("无法访问所选目录")
                 val root = existingRootRef
@@ -3214,11 +3464,15 @@ class SteamSessionManager @Inject constructor(
                         treeUri: String?,
                         downloadFolderName: String?,
                         onPhaseChanged: suspend (String?) -> Unit,
-                    ): String = rootUri
+                    ): WorkshopExportResult = WorkshopExportResult(
+                        savedUri = rootUri,
+                    )
                 }
             }
 
-            existingRootRef?.startsWith(DOWNLOADS_ROOT_REF_PREFIX) == true && treeUri.isNullOrBlank() -> {
+            postProcessorSelection == null &&
+                existingRootRef?.startsWith(DOWNLOADS_ROOT_REF_PREFIX) == true &&
+                treeUri.isNullOrBlank() -> {
                 check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     "公共下载目录需要 Android 10 及以上，请在设置中选择自定义根目录。"
                 }
@@ -3267,7 +3521,13 @@ class SteamSessionManager @Inject constructor(
                         treeUri: String?,
                         downloadFolderName: String?,
                         onPhaseChanged: suspend (String?) -> Unit,
-                    ): String = rootUri
+                    ): WorkshopExportResult = WorkshopExportResult(
+                        savedUri = rootUri,
+                        savedRelativePath = buildMediaStoreRootRelativePath(
+                            folderName = downloadFolderName,
+                            rootName = resolvedRootName,
+                        ),
+                    )
                 }
             }
 
@@ -3307,13 +3567,23 @@ class SteamSessionManager @Inject constructor(
                         treeUri: String?,
                         downloadFolderName: String?,
                         onPhaseChanged: suspend (String?) -> Unit,
-                    ): String {
-                        return exportLocalWorkshopRoot(
-                            localRootDir = localRoot,
-                            rootName = safeRootName,
+                    ): WorkshopExportResult {
+                        val postProcessResult = postProcessorSelection?.let { selection ->
+                            onPhaseChanged("正在执行${selection.displayName}…")
+                            selection.processor.process(
+                                inputRoot = localRoot,
+                                outputBaseName = safeRootName,
+                                config = selection.config,
+                                onPhaseChanged = onPhaseChanged,
+                            )
+                        }
+                        val exportArtifact = postProcessResult?.artifact ?: localRoot
+                        return exportLocalWorkshopArtifact(
+                            localArtifact = exportArtifact,
                             treeUri = treeUri,
                             downloadFolderName = downloadFolderName,
                             onPhaseChanged = onPhaseChanged,
+                            postProcessSummary = postProcessResult?.summary,
                         )
                     }
                 }
@@ -3377,12 +3647,16 @@ class SteamSessionManager @Inject constructor(
                     (normalizedParallelism * 2).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
                 DownloadPerformanceMode.Compatibility ->
                     (normalizedParallelism + 1).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
+                DownloadPerformanceMode.Primordial ->
+                    (normalizedParallelism * 3).coerceAtLeast(performanceProfile.dispatcherRequestFloor)
             }
             maxRequestsPerHost = when (performanceProfile.mode) {
                 DownloadPerformanceMode.Auto ->
                     (normalizedParallelism + 2).coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
                 DownloadPerformanceMode.Compatibility ->
                     normalizedParallelism.coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
+                DownloadPerformanceMode.Primordial ->
+                    (normalizedParallelism + 4).coerceAtLeast(performanceProfile.dispatcherPerHostFloor)
             }
         }
         val connectionPool = cdnConnectionPoolCache.getOrPut(forceDirect) {
@@ -3413,6 +3687,7 @@ class SteamSessionManager @Inject constructor(
     private fun effectiveDownloadPerformanceProfile(
         requested: Int,
         mode: DownloadPerformanceMode,
+        reducedMemoryProtectionEnabled: Boolean,
     ): DownloadPerformanceProfile {
         val normalizedRequested = requested.coerceIn(1, MAX_DOWNLOAD_CHUNK_CONCURRENCY)
         val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
@@ -3452,12 +3727,38 @@ class SteamSessionManager @Inject constructor(
                 heapBudgetMb <= 512 -> 3
                 else -> 4
             }
+
+            DownloadPerformanceMode.Primordial ->
+                if (reducedMemoryProtectionEnabled) {
+                    when {
+                        availableHeapMb < 96 -> 5
+                        isLowRamDevice && availableHeapMb < 128 -> 5
+                        isLowRamDevice && heapBudgetMb <= 256 -> 6
+                        heapBudgetMb <= 256 -> 8
+                        heapBudgetMb <= 384 -> 12
+                        heapBudgetMb <= 512 -> 16
+                        heapBudgetMb <= 768 -> 20
+                        else -> 24
+                    }
+                } else {
+                    when {
+                        availableHeapMb < 96 -> 4
+                        isLowRamDevice && availableHeapMb < 128 -> 4
+                        isLowRamDevice && heapBudgetMb <= 256 -> 5
+                        heapBudgetMb <= 256 -> 6
+                        heapBudgetMb <= 384 -> 10
+                        heapBudgetMb <= 512 -> 14
+                        heapBudgetMb <= 768 -> 18
+                        else -> 24
+                    }
+                }
         }
         val chunkConcurrency = normalizedRequested.coerceAtMost(ceiling).coerceAtLeast(1)
         return when (mode) {
             DownloadPerformanceMode.Auto ->
                 DownloadPerformanceProfile(
                     mode = mode,
+                    reducedMemoryProtectionEnabled = false,
                     requestedChunkConcurrency = normalizedRequested,
                     chunkConcurrency = chunkConcurrency,
                     maxRoutesPerTransport = MAX_CDN_ROUTES_PER_TRANSPORT,
@@ -3472,12 +3773,28 @@ class SteamSessionManager @Inject constructor(
             DownloadPerformanceMode.Compatibility ->
                 DownloadPerformanceProfile(
                     mode = mode,
+                    reducedMemoryProtectionEnabled = false,
                     requestedChunkConcurrency = normalizedRequested,
                     chunkConcurrency = chunkConcurrency,
                     maxRoutesPerTransport = 2,
                     maxActiveRoutes = 2,
                     dispatcherRequestFloor = 4,
                     dispatcherPerHostFloor = 2,
+                    heapBudgetMb = heapBudgetMb,
+                    availableHeapMb = availableHeapMb,
+                    isLowRamDevice = isLowRamDevice,
+                )
+
+            DownloadPerformanceMode.Primordial ->
+                DownloadPerformanceProfile(
+                    mode = mode,
+                    reducedMemoryProtectionEnabled = reducedMemoryProtectionEnabled,
+                    requestedChunkConcurrency = normalizedRequested,
+                    chunkConcurrency = chunkConcurrency,
+                    maxRoutesPerTransport = if (reducedMemoryProtectionEnabled) 8 else 6,
+                    maxActiveRoutes = if (reducedMemoryProtectionEnabled) 8 else 6,
+                    dispatcherRequestFloor = if (reducedMemoryProtectionEnabled) 20 else 16,
+                    dispatcherPerHostFloor = if (reducedMemoryProtectionEnabled) 10 else 8,
                     heapBudgetMb = heapBudgetMb,
                     availableHeapMb = availableHeapMb,
                     isLowRamDevice = isLowRamDevice,
@@ -3649,11 +3966,11 @@ class SteamSessionManager @Inject constructor(
 
     private fun prioritizedAnonymousConnectionProfiles(): List<ConnectionProfile> {
         val tcpFirstOrder = listOf(
-            "tcp-directory",
             "tcp-seeded",
+            "tcp-directory",
             "tcp+ws-directory",
-            "ws-directory",
             "ws-seeded",
+            "ws-directory",
         )
         val orderedProfiles = tcpFirstOrder.mapNotNull { label ->
             primaryConnectionProfiles.firstOrNull { it.label == label }
@@ -3661,9 +3978,51 @@ class SteamSessionManager @Inject constructor(
         val preferredLabel = preferredConnectionProfileLabel ?: return orderedProfiles
         val preferredProfile = orderedProfiles.firstOrNull { it.label == preferredLabel }
             ?: return orderedProfiles
-        return buildList {
-            add(preferredProfile)
-            addAll(orderedProfiles.filterNot { it.label == preferredLabel })
+        return if (!preferredProfile.useDirectoryFetch) {
+            buildList {
+                add(preferredProfile)
+                addAll(orderedProfiles.filterNot { it.label == preferredLabel })
+            }
+        } else {
+            orderedProfiles
+        }
+    }
+
+    private fun anonymousConnectionProfiles(bestEffort: Boolean): List<ConnectionProfile> {
+        val orderedProfiles = prioritizedAnonymousConnectionProfiles().map { profile ->
+            when {
+                !profile.useDirectoryFetch && bestEffort ->
+                    profile.copy(connectionTimeoutMs = ANONYMOUS_PREWARM_SEEDED_TIMEOUT_MS)
+
+                profile.useDirectoryFetch && bestEffort ->
+                    profile.copy(connectionTimeoutMs = ANONYMOUS_PREWARM_DIRECTORY_TIMEOUT_MS)
+
+                !profile.useDirectoryFetch ->
+                    profile.copy(connectionTimeoutMs = ANONYMOUS_SEEDED_TIMEOUT_MS)
+
+                else -> profile
+            }
+        }
+        return if (bestEffort) orderedProfiles.take(2) else orderedProfiles
+    }
+
+    private fun anonymousConnectWaitTimeoutMs(profile: ConnectionProfile): Long {
+        val paddingMs = if (profile.useDirectoryFetch) 2_500L else 1_500L
+        return profile.connectionTimeoutMs + paddingMs
+    }
+
+    private fun anonymousLogOnWaitTimeoutMs(profile: ConnectionProfile): Long {
+        return if (profile.useDirectoryFetch) 10_000L else 8_000L
+    }
+
+    private suspend fun cancelBlockingAnonymousPrewarmIfNeeded() {
+        val currentJob = coroutineContext[Job]
+        val blockingJob = anonymousPrewarmJob
+            ?.takeIf { anonymousPrewarmInFlight && it.isActive && it != currentJob }
+        blockingJob?.let { job ->
+            Log.i(LOG_TAG, "cancelBlockingAnonymousPrewarmIfNeeded cancel in-flight prewarm")
+            job.cancel()
+            job.join()
         }
     }
 
@@ -3829,13 +4188,57 @@ class SteamSessionManager @Inject constructor(
         return parent.createDirectory("$directoryName ($index)") ?: error("无法创建目录")
     }
 
+    private fun uniqueFileNameForTree(
+        parent: DocumentFile,
+        fileName: String,
+    ): String {
+        if (parent.findFile(fileName) == null) return fileName
+        val dot = fileName.lastIndexOf('.')
+        val base = if (dot >= 0) fileName.substring(0, dot) else fileName
+        val extension = if (dot >= 0) fileName.substring(dot) else ""
+        var index = 1
+        while (parent.findFile("$base ($index)$extension") != null) {
+            index++
+        }
+        return "$base ($index)$extension"
+    }
+
+    private suspend fun exportLocalWorkshopArtifact(
+        localArtifact: File,
+        treeUri: String?,
+        downloadFolderName: String?,
+        onPhaseChanged: suspend (String?) -> Unit,
+        postProcessSummary: String? = null,
+    ): WorkshopExportResult {
+        check(localArtifact.exists()) { "本地下载结果不存在" }
+        return if (localArtifact.isDirectory) {
+            exportLocalWorkshopRoot(
+                localRootDir = localArtifact,
+                rootName = localArtifact.name,
+                treeUri = treeUri,
+                downloadFolderName = downloadFolderName,
+                onPhaseChanged = onPhaseChanged,
+                postProcessSummary = postProcessSummary,
+            )
+        } else {
+            exportLocalWorkshopFile(
+                localFile = localArtifact,
+                treeUri = treeUri,
+                downloadFolderName = downloadFolderName,
+                onPhaseChanged = onPhaseChanged,
+                postProcessSummary = postProcessSummary,
+            )
+        }
+    }
+
     private suspend fun exportLocalWorkshopRoot(
         localRootDir: File,
         rootName: String,
         treeUri: String?,
         downloadFolderName: String?,
         onPhaseChanged: suspend (String?) -> Unit,
-    ): String {
+        postProcessSummary: String? = null,
+    ): WorkshopExportResult {
         check(localRootDir.exists() && localRootDir.isDirectory) { "本地暂存目录不存在" }
         return if (!treeUri.isNullOrBlank()) {
             exportLocalWorkshopRootToTree(
@@ -3843,6 +4246,7 @@ class SteamSessionManager @Inject constructor(
                 rootName = rootName,
                 treeUri = treeUri,
                 onPhaseChanged = onPhaseChanged,
+                postProcessSummary = postProcessSummary,
             )
         } else {
             exportLocalWorkshopRootToMediaStore(
@@ -3850,8 +4254,29 @@ class SteamSessionManager @Inject constructor(
                 rootName = rootName,
                 downloadFolderName = downloadFolderName,
                 onPhaseChanged = onPhaseChanged,
+                postProcessSummary = postProcessSummary,
             )
         }
+    }
+
+    private suspend fun exportLocalWorkshopFile(
+        localFile: File,
+        treeUri: String?,
+        downloadFolderName: String?,
+        onPhaseChanged: suspend (String?) -> Unit,
+        postProcessSummary: String? = null,
+    ): WorkshopExportResult {
+        check(localFile.exists() && localFile.isFile) { "本地后处理结果不存在" }
+        onPhaseChanged("正在整理文件…")
+        val result = if (!treeUri.isNullOrBlank()) {
+            exportLocalWorkshopFileToTree(localFile, treeUri)
+        } else {
+            exportLocalWorkshopFileToMediaStore(localFile, downloadFolderName)
+        }
+        onPhaseChanged(null)
+        return result.copy(
+            postProcessSummary = postProcessSummary,
+        )
     }
 
     private suspend fun exportLocalWorkshopRootToTree(
@@ -3859,16 +4284,20 @@ class SteamSessionManager @Inject constructor(
         rootName: String,
         treeUri: String,
         onPhaseChanged: suspend (String?) -> Unit,
-    ): String {
+        postProcessSummary: String? = null,
+    ): WorkshopExportResult {
         val parent = DocumentFile.fromTreeUri(appContext, Uri.parse(treeUri))
             ?: error("无法访问所选目录")
+        val exportPlan = buildWorkshopExportPlan(localRootDir)
+        if (exportPlan.renamedCount > 0) {
+            Log.w(LOG_TAG, "exportLocalWorkshopRootToTree normalized ${exportPlan.renamedCount} conflicting relative paths for ${localRootDir.name}")
+        }
         val root = uniqueDirectoryForTree(parent, rootName)
-        val files = localRootDir.walkTopDown().filter { it.isFile }.toList()
         var lastReportedAt = 0L
         suspend fun maybeReport(exportedFiles: Int, force: Boolean = false) {
             val now = System.currentTimeMillis()
             if (!force &&
-                exportedFiles < files.size &&
+                exportedFiles < exportPlan.files.size &&
                 now - lastReportedAt < EXPORT_PROGRESS_UPDATE_INTERVAL_MS
             ) {
                 return
@@ -3876,15 +4305,14 @@ class SteamSessionManager @Inject constructor(
             reportExportPhase(
                 onPhaseChanged = onPhaseChanged,
                 exportedFiles = exportedFiles,
-                totalFiles = files.size,
+                totalFiles = exportPlan.files.size,
             )
             lastReportedAt = now
         }
         maybeReport(exportedFiles = 0, force = true)
         try {
-            files.forEachIndexed { index, source ->
-                val relativeSegments = source.relativeTo(localRootDir)
-                    .invariantSeparatorsPath
+            exportPlan.files.forEachIndexed { index, planned ->
+                val relativeSegments = planned.relativePath
                     .split('/')
                     .filter(String::isNotBlank)
                 val parentDir = findOrCreateTreeDirectory(root, relativeSegments.dropLast(1))
@@ -3893,16 +4321,42 @@ class SteamSessionManager @Inject constructor(
                     ?: error("无法创建目标文件")
                 copyLocalFileToUri(
                     context = appContext,
-                    source = source,
+                    source = planned.source,
                     targetUri = document.uri,
                     bufferSize = WORKSHOP_FILE_WRITE_BUFFER_SIZE,
                 )
                 maybeReport(exportedFiles = index + 1)
             }
             onPhaseChanged(null)
-            return root.uri.toString()
+            return WorkshopExportResult(
+                savedUri = root.uri.toString(),
+                postProcessSummary = postProcessSummary,
+            )
         } catch (throwable: Throwable) {
             root.delete()
+            throw throwable
+        }
+    }
+
+    private fun exportLocalWorkshopFileToTree(
+        localFile: File,
+        treeUri: String,
+    ): WorkshopExportResult {
+        val parent = DocumentFile.fromTreeUri(appContext, Uri.parse(treeUri))
+            ?: error("无法访问所选目录")
+        val targetName = uniqueFileNameForTree(parent, localFile.name)
+        val document = parent.createFile("application/octet-stream", targetName)
+            ?: error("无法创建目标文件")
+        try {
+            copyLocalFileToUri(
+                context = appContext,
+                source = localFile,
+                targetUri = document.uri,
+                bufferSize = WORKSHOP_FILE_WRITE_BUFFER_SIZE,
+            )
+            return WorkshopExportResult(savedUri = document.uri.toString())
+        } catch (throwable: Throwable) {
+            document.delete()
             throw throwable
         }
     }
@@ -3912,21 +4366,65 @@ class SteamSessionManager @Inject constructor(
         rootName: String,
         downloadFolderName: String?,
         onPhaseChanged: suspend (String?) -> Unit,
-    ): String {
+        postProcessSummary: String? = null,
+    ): WorkshopExportResult {
         check(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             "公共下载目录需要 Android 10 及以上，请在设置中选择自定义根目录。"
+        }
+        val exportPlan = buildWorkshopExportPlan(localRootDir)
+        if (exportPlan.renamedCount > 0) {
+            Log.w(LOG_TAG, "exportLocalWorkshopRootToMediaStore normalized ${exportPlan.renamedCount} conflicting relative paths for ${localRootDir.name}")
         }
         val resolvedRootName = uniqueMediaStoreRootName(
             context = appContext,
             folderName = downloadFolderName,
             baseRootName = rootName,
         )
-        val files = localRootDir.walkTopDown().filter { it.isFile }.toList()
+        return try {
+            exportPlannedWorkshopRootToMediaStore(
+                exportPlan = exportPlan,
+                resolvedRootName = resolvedRootName,
+                downloadFolderName = downloadFolderName,
+                onPhaseChanged = onPhaseChanged,
+                postProcessSummary = postProcessSummary,
+            )
+        } catch (throwable: Throwable) {
+            if (throwable.isMediaStoreUniqueConstraintFailure()) {
+                val timestampedRootName = uniqueMediaStoreRootNameWithTimestampFallback(
+                    context = appContext,
+                    folderName = downloadFolderName,
+                    baseRootName = resolvedRootName,
+                )
+                Log.w(
+                    LOG_TAG,
+                    "exportLocalWorkshopRootToMediaStore retry with timestamped root due to MediaStore conflict base=$resolvedRootName fallback=$timestampedRootName",
+                )
+                exportPlannedWorkshopRootToMediaStore(
+                    exportPlan = exportPlan,
+                    resolvedRootName = timestampedRootName,
+                    downloadFolderName = downloadFolderName,
+                    onPhaseChanged = onPhaseChanged,
+                    postProcessSummary = postProcessSummary,
+                )
+            } else {
+                throw throwable
+            }
+        }
+    }
+
+    private suspend fun exportPlannedWorkshopRootToMediaStore(
+        exportPlan: com.slay.workshopnative.core.storage.WorkshopExportPlan,
+        resolvedRootName: String,
+        downloadFolderName: String?,
+        onPhaseChanged: suspend (String?) -> Unit,
+        postProcessSummary: String? = null,
+    ): WorkshopExportResult {
+        val createdUris = mutableListOf<Uri>()
         var lastReportedAt = 0L
         suspend fun maybeReport(exportedFiles: Int, force: Boolean = false) {
             val now = System.currentTimeMillis()
             if (!force &&
-                exportedFiles < files.size &&
+                exportedFiles < exportPlan.files.size &&
                 now - lastReportedAt < EXPORT_PROGRESS_UPDATE_INTERVAL_MS
             ) {
                 return
@@ -3934,24 +4432,23 @@ class SteamSessionManager @Inject constructor(
             reportExportPhase(
                 onPhaseChanged = onPhaseChanged,
                 exportedFiles = exportedFiles,
-                totalFiles = files.size,
+                totalFiles = exportPlan.files.size,
             )
             lastReportedAt = now
         }
         maybeReport(exportedFiles = 0, force = true)
-        files.forEachIndexed { index, source ->
-                val relativePath = source.relativeTo(localRootDir).invariantSeparatorsPath
-                val uri = createMediaStoreFileUri(
-                    context = appContext,
+        try {
+            exportPlan.files.forEachIndexed { index, planned ->
+                val uri = createMediaStoreFileUriWithRetries(
                     folderName = downloadFolderName,
                     rootName = resolvedRootName,
-                    relativePath = relativePath,
-                    replaceExisting = true,
+                    planned = planned,
                 )
+                createdUris += uri
                 try {
                     copyLocalFileToUri(
                         context = appContext,
-                        source = source,
+                        source = planned.source,
                         targetUri = uri,
                         bufferSize = WORKSHOP_FILE_WRITE_BUFFER_SIZE,
                     )
@@ -3959,11 +4456,146 @@ class SteamSessionManager @Inject constructor(
                     maybeReport(exportedFiles = index + 1)
                 } catch (throwable: Throwable) {
                     appContext.contentResolver.delete(uri, null, null)
+                    createdUris.remove(uri)
                     throw throwable
                 }
             }
-        onPhaseChanged(null)
-        return MEDIASTORE_DOWNLOADS_URI_STRING
+            onPhaseChanged(null)
+            return WorkshopExportResult(
+                savedUri = MEDIASTORE_DOWNLOADS_URI_STRING,
+                savedRelativePath = buildMediaStoreRootRelativePath(
+                    folderName = downloadFolderName,
+                    rootName = resolvedRootName,
+                ),
+                postProcessSummary = postProcessSummary,
+            )
+        } catch (throwable: Throwable) {
+            createdUris.forEach { uri ->
+                runCatching { appContext.contentResolver.delete(uri, null, null) }
+            }
+            throw throwable
+        }
+    }
+
+    private fun exportLocalWorkshopFileToMediaStore(
+        localFile: File,
+        downloadFolderName: String?,
+    ): WorkshopExportResult {
+        val planned = PlannedWorkshopExportFile(
+            source = localFile,
+            relativePath = localFile.name,
+        )
+        val uri = createMediaStoreFileUriWithRetries(
+            folderName = downloadFolderName,
+            rootName = null,
+            planned = planned,
+        )
+        try {
+            copyLocalFileToUri(
+                context = appContext,
+                source = localFile,
+                targetUri = uri,
+                bufferSize = WORKSHOP_FILE_WRITE_BUFFER_SIZE,
+            )
+            finalizeMediaStoreFile(appContext, uri)
+            return WorkshopExportResult(
+                savedUri = uri.toString(),
+                savedRelativePath = queryMediaStoreRelativePath(uri),
+            )
+        } catch (throwable: Throwable) {
+            appContext.contentResolver.delete(uri, null, null)
+            throw throwable
+        }
+    }
+
+    private fun buildMediaStoreRootRelativePath(
+        folderName: String?,
+        rootName: String,
+    ): String {
+        val normalizedFolder = normalizeDownloadFolderName(folderName)
+        return "${Environment.DIRECTORY_DOWNLOADS}/$normalizedFolder/$rootName/"
+    }
+
+    private fun queryMediaStoreRelativePath(uri: Uri): String? {
+        return runCatching {
+            appContext.contentResolver.query(
+                uri,
+                arrayOf(MediaStore.MediaColumns.RELATIVE_PATH),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.RELATIVE_PATH))
+                } else {
+                    null
+                }
+            }
+        }.getOrNull()
+    }
+
+    private fun createMediaStoreFileUriWithRetries(
+        folderName: String?,
+        rootName: String?,
+        planned: PlannedWorkshopExportFile,
+    ): Uri {
+        val candidateRelativePaths = buildMediaStoreRelativePathCandidates(planned.relativePath)
+        var lastFailure: Throwable? = null
+        candidateRelativePaths.forEach { candidateRelativePath ->
+            val uri = try {
+                createMediaStoreFileUri(
+                    context = appContext,
+                    folderName = folderName,
+                    rootName = rootName,
+                    relativePath = candidateRelativePath,
+                    replaceExisting = false,
+                )
+            } catch (throwable: Throwable) {
+                if (throwable.isMediaStoreUniqueConstraintFailure()) {
+                    lastFailure = throwable
+                    null
+                } else {
+                    throw throwable
+                }
+            }
+            if (uri != null) {
+                return uri
+            }
+        }
+        throw lastFailure ?: error("无法创建目标文件")
+    }
+
+    private fun buildMediaStoreRelativePathCandidates(
+        relativePath: String,
+    ): List<String> {
+        val normalized = relativePath.replace('\\', '/')
+        val slash = normalized.lastIndexOf('/')
+        val directory = if (slash >= 0) normalized.substring(0, slash) else ""
+        val fileName = if (slash >= 0) normalized.substring(slash + 1) else normalized
+        val fileNameCandidates = listOf(
+            fileName,
+            appendOrdinalSuffix(fileName, 1),
+            appendTimestampSuffix(fileName),
+        ).distinct()
+        return fileNameCandidates.map { candidate ->
+            if (directory.isBlank()) candidate else "$directory/$candidate"
+        }
+    }
+
+    private fun Throwable.isMediaStoreUniqueConstraintFailure(): Boolean {
+        generateSequence(this) { it.cause }
+            .mapNotNull { it.message }
+            .forEach { message ->
+                val normalized = message.lowercase()
+                if (
+                    "unique constraint failed" in normalized ||
+                    "sqlite code 2067" in normalized ||
+                    "files._data" in normalized
+                ) {
+                    return true
+                }
+            }
+        return false
     }
 
     private suspend fun reportExportPhase(
@@ -3995,8 +4627,14 @@ class SteamSessionManager @Inject constructor(
             treeUri: String?,
             downloadFolderName: String?,
             onPhaseChanged: suspend (String?) -> Unit,
-        ): String
+        ): WorkshopExportResult
     }
+
+    data class WorkshopExportResult(
+        val savedUri: String,
+        val savedRelativePath: String? = null,
+        val postProcessSummary: String? = null,
+    )
 
     private suspend fun authenticateWithCredentialsWithRetry(
         username: String,
@@ -4698,6 +5336,13 @@ class SteamSessionManager @Inject constructor(
         return buildWorkshopBrowseUrl(appId, query).toString()
     }
 
+    private fun isWorkshopUnavailableRedirect(finalUrl: okhttp3.HttpUrl): Boolean {
+        val normalizedPath = finalUrl.encodedPath.trimEnd('/')
+        if (finalUrl.host != "steamcommunity.com") return false
+        if (normalizedPath != "/workshop") return false
+        return finalUrl.queryParameter("appid").isNullOrBlank()
+    }
+
     private fun workshopSubscriptionsCacheKey(
         steamId64: Long,
         appId: Int,
@@ -4760,6 +5405,7 @@ class SteamSessionManager @Inject constructor(
                     ),
                     previewUrl = previewById[publishedFileId],
                     authorName = authorById[publishedFileId].orEmpty(),
+                    authorProfileUrl = null,
                     detailUrl = "https://steamcommunity.com/sharedfiles/filedetails/?id=$publishedFileId",
                     fileUrl = null,
                     fileName = null,
@@ -5090,6 +5736,12 @@ class SteamSessionManager @Inject constructor(
         return description.isBlank() || title.isBlank() || title.startsWith("Workshop #")
     }
 
+    private fun WorkshopItem.needsWorkshopDetailPageEnrichmentForDetails(): Boolean {
+        return needsWorkshopDetailPageFallback() ||
+            authorName.isBlank() ||
+            (creatorSteamId <= 0L && authorProfileUrl.isNullOrBlank())
+    }
+
     private fun WorkshopItem.mergeWorkshopDetailPage(
         detailPage: WorkshopDetailPageContent,
     ): WorkshopItem {
@@ -5108,6 +5760,9 @@ class SteamSessionManager @Inject constructor(
             title = detailPage.title.ifBlank { title },
             shortDescription = mergedShortDescription,
             description = mergedDescription,
+            authorName = detailPage.authorName.ifBlank { authorName },
+            authorProfileUrl = detailPage.authorProfileUrl ?: authorProfileUrl,
+            creatorSteamId = creatorSteamId.takeIf { it > 0L } ?: detailPage.creatorSteamId,
         )
     }
 
@@ -5133,7 +5788,7 @@ class SteamSessionManager @Inject constructor(
                 }
                 response.body?.string().orEmpty()
             }
-            val document = Jsoup.parse(html)
+            val document = Jsoup.parse(html, detailUrl.toString())
             val title = document.selectFirst("div.workshopItemTitle")
                 ?.text()
                 .orEmpty()
@@ -5141,10 +5796,35 @@ class SteamSessionManager @Inject constructor(
                 ?.html()
                 ?.let(::htmlToDisplayText)
                 .orEmpty()
+            val authorProfileUrl = document
+                .selectFirst("div.creatorsBlock a.friendBlockLinkOverlay[href]")
+                ?.attr("abs:href")
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+            val authorName = document
+                .selectFirst("div.creatorsBlock div.friendBlockContent")
+                ?.let { authorBlock ->
+                    authorBlock.ownText().trim().ifBlank {
+                        authorBlock.wholeText()
+                            .lineSequence()
+                            .map(String::trim)
+                            .firstOrNull(String::isNotBlank)
+                            .orEmpty()
+                    }
+                }
+                .orEmpty()
             WorkshopDetailPageContent(
                 title = title,
                 description = description,
-            ).takeIf { it.title.isNotBlank() || it.description.isNotBlank() }
+                authorName = authorName,
+                authorProfileUrl = authorProfileUrl,
+                creatorSteamId = extractSteamId64FromProfileUrl(authorProfileUrl) ?: 0L,
+            ).takeIf {
+                it.title.isNotBlank() ||
+                    it.description.isNotBlank() ||
+                    it.authorName.isNotBlank() ||
+                    !it.authorProfileUrl.isNullOrBlank()
+            }
         }.onFailure { throwable ->
             Log.w(
                 LOG_TAG,
@@ -5152,6 +5832,14 @@ class SteamSessionManager @Inject constructor(
                 throwable,
             )
         }.getOrNull()
+    }
+
+    private fun extractSteamId64FromProfileUrl(url: String?): Long? {
+        val normalizedUrl = url?.trim()?.takeIf(String::isNotBlank) ?: return null
+        val parsedUrl = runCatching { normalizedUrl.toHttpUrl() }.getOrNull() ?: return null
+        val pathSegments = parsedUrl.pathSegments
+        if (pathSegments.size < 2 || pathSegments[0] != "profiles") return null
+        return pathSegments[1].toLongOrNull()
     }
 
     private fun extractPackageAppIds(packageInfo: PICSProductInfo): Set<Int> {
@@ -5194,6 +5882,7 @@ class SteamSessionManager @Inject constructor(
             description = details.fileDescription.orEmpty(),
             previewUrl = details.previewUrl?.takeIf(String::isNotBlank),
             authorName = "",
+            authorProfileUrl = null,
             detailUrl = "https://steamcommunity.com/sharedfiles/filedetails/?id=${details.publishedFileId}",
             fileUrl = details.fileUrl?.takeIf(String::isNotBlank),
             fileName = details.filename?.takeIf(String::isNotBlank),
@@ -5239,6 +5928,7 @@ class SteamSessionManager @Inject constructor(
             description = details.fileDescription,
             previewUrl = details.previewUrl.takeIf(String::isNotBlank),
             authorName = "",
+            authorProfileUrl = null,
             detailUrl = "https://steamcommunity.com/sharedfiles/filedetails/?id=${details.publishedfileid}",
             fileUrl = details.fileUrl.takeIf(String::isNotBlank),
             fileName = details.filename.takeIf(String::isNotBlank),
@@ -5310,11 +6000,17 @@ class SteamSessionManager @Inject constructor(
     )
 
     @Serializable
-    private data class WorkshopSearchGameDto(
-        @SerialName("appid") val appId: Int,
+    private data class StoreSearchResponse(
+        val total: Int = 0,
+        val items: List<StoreSearchAppDto> = emptyList(),
+    )
+
+    @Serializable
+    private data class StoreSearchAppDto(
+        val type: String = "",
+        val id: Int = 0,
         val name: String,
-        val icon: String? = null,
-        val logo: String? = null,
+        @SerialName("tiny_image") val tinyImage: String? = null,
     )
 
     @Serializable

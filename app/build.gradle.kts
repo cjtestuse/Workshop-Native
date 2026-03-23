@@ -40,6 +40,7 @@ android {
         targetSdk = 35
         versionCode = appVersionCode
         versionName = appVersionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "UPDATE_GITHUB_OWNER", "\"cjtestuse\"")
         buildConfigField("String", "UPDATE_GITHUB_REPO", "\"Workshop-Native\"")
         multiDexEnabled = true
@@ -110,6 +111,7 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.coil.compose)
+    implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
     implementation(libs.compose.material.icons)
     implementation(libs.compose.material3)
@@ -127,10 +129,16 @@ dependencies {
     implementation(libs.protobuf.java)
     implementation(libs.spongycastle)
     implementation(libs.xz)
+    implementation("org.lz4:lz4-java:1.8.0")
     implementation("org.jsoup:jsoup:1.18.3")
     implementation("com.github.luben:zstd-jni:${libs.versions.zstd.get()}@aar")
 
     debugImplementation(libs.compose.ui.tooling)
+
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    testImplementation("junit:junit:4.13.2")
 
     ksp(libs.androidx.room.compiler)
     ksp(libs.androidx.hilt.compiler)

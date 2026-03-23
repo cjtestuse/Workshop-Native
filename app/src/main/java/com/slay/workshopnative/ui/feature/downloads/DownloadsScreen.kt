@@ -18,29 +18,39 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Restore
+import androidx.compose.material.icons.rounded.SystemUpdateAlt
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -59,12 +69,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.slay.workshopnative.BuildConfig
 import com.slay.workshopnative.core.logging.AppLog as Log
 import com.slay.workshopnative.core.storage.MEDIASTORE_DOWNLOADS_URI_STRING
 import com.slay.workshopnative.core.util.formatBytes
@@ -72,6 +84,7 @@ import com.slay.workshopnative.core.util.sanitizeRuntimeSourceAddress
 import com.slay.workshopnative.data.local.DownloadAuthMode
 import com.slay.workshopnative.data.local.DownloadStatus
 import com.slay.workshopnative.data.local.DownloadTaskEntity
+import com.slay.workshopnative.data.repository.DownloadedItemUpdateCandidate
 import com.slay.workshopnative.ui.components.ArtworkThumbnail
 import com.slay.workshopnative.ui.components.WorkshopNativeModalBottomSheet
 import com.slay.workshopnative.ui.components.steamCapsuleUrl
@@ -118,12 +131,17 @@ fun DownloadsScreen(
     viewModel: DownloadsViewModel = hiltViewModel(),
 ) {
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
+    val isCreatingTask by viewModel.isCreatingTask.collectAsStateWithLifecycle()
+    val isCheckingUpdates by viewModel.isCheckingUpdates.collectAsStateWithLifecycle()
+    val isSimulatingUpdate by viewModel.isSimulatingUpdate.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedTaskId by rememberSaveable { mutableStateOf<String?>(null) }
     var previewTaskId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTabName by rememberSaveable { mutableStateOf<String?>(null) }
+    var isCreateTaskSheetVisible by rememberSaveable { mutableStateOf(false) }
+    var createTaskInput by rememberSaveable { mutableStateOf("") }
 
     val selectedTask = downloads.firstOrNull { it.taskId == selectedTaskId }
     val previewTask = downloads.firstOrNull { it.taskId == previewTaskId }
@@ -196,6 +214,13 @@ fun DownloadsScreen(
         }
     }
 
+    LaunchedEffect(viewModel) {
+        viewModel.taskCreated.collectLatest {
+            isCreateTaskSheetVisible = false
+            createTaskInput = ""
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -214,6 +239,12 @@ fun DownloadsScreen(
                     selectedTab = selectedTab,
                     onSelectTab = { tab -> selectedTabName = tab.name },
                     hasInactiveHistory = hasInactiveHistory,
+                    isCheckingUpdates = isCheckingUpdates,
+                    isSimulatingUpdate = isSimulatingUpdate,
+                    showDebugActions = BuildConfig.DEBUG,
+                    onCreateTask = { isCreateTaskSheetVisible = true },
+                    onCheckUpdates = viewModel::checkDownloadedItemsForUpdates,
+                    onSimulateUpdate = viewModel::simulateUpdateAvailable,
                     onRefresh = viewModel::refresh,
                     onClearHistory = viewModel::clearInactiveHistory,
                 )
@@ -223,7 +254,7 @@ fun DownloadsScreen(
                 item {
                     DownloadsEmptyStateCard(
                         title = "当前还没有下载任务",
-                        message = "去工坊列表点开条目，详情里直接加入下载队列。",
+                        message = "去工坊列表点开条目，或直接在这里输入 publishedFileId 新建下载任务。",
                     )
                 }
             } else {
@@ -344,6 +375,25 @@ fun DownloadsScreen(
             DownloadResultSheet(task = task)
         }
     }
+
+    if (isCreateTaskSheetVisible) {
+        WorkshopNativeModalBottomSheet(
+            onDismissRequest = {
+                if (!isCreatingTask) {
+                    isCreateTaskSheetVisible = false
+                }
+            },
+        ) {
+            CreateDownloadTaskSheet(
+                input = createTaskInput,
+                onInputChange = { createTaskInput = it },
+                isSubmitting = isCreatingTask,
+                onSubmit = { viewModel.enqueueByPublishedFileId(createTaskInput) },
+                onDismiss = { isCreateTaskSheetVisible = false },
+            )
+        }
+    }
+
 }
 
 @Composable
@@ -516,6 +566,9 @@ private fun DownloadListItem(
                             modifier = Modifier.weight(1f),
                             verticalArrangement = Arrangement.spacedBy(3.dp),
                         ) {
+                            if (task.status == DownloadStatus.Success && task.hasUpdateAvailable) {
+                                UpdateAvailableBadge(compact = compact)
+                            }
                             Text(
                                 text = task.title,
                                 maxLines = 1,
@@ -758,10 +811,10 @@ private fun DownloadTaskSheet(
                 )
                 DetailBlock(
                     label = "结果路径",
-                    value = task.savedFileUri ?: task.targetTreeUri ?: "当前还没有落盘结果",
+                    value = task.savedRelativePath ?: task.savedFileUri ?: task.targetTreeUri ?: "当前还没有落盘结果",
                 )
                 task.supportingMessage()?.let { message ->
-                    DetailBlock(label = "错误信息", value = message)
+                    DetailBlock(label = task.supportingMessageLabel(), value = message)
                 }
             }
         }
@@ -869,6 +922,12 @@ private fun DownloadsControlPanel(
     selectedTab: DownloadsTab,
     onSelectTab: (DownloadsTab) -> Unit,
     hasInactiveHistory: Boolean,
+    isCheckingUpdates: Boolean,
+    isSimulatingUpdate: Boolean,
+    showDebugActions: Boolean,
+    onCreateTask: () -> Unit,
+    onCheckUpdates: () -> Unit,
+    onSimulateUpdate: () -> Unit,
     onRefresh: () -> Unit,
     onClearHistory: () -> Unit,
 ) {
@@ -904,9 +963,53 @@ private fun DownloadsControlPanel(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     IconActionSurface(
+                        onClick = onCreateTask,
+                        icon = { Icon(Icons.Rounded.Add, contentDescription = "新建下载任务") },
+                    )
+                    IconActionSurface(
                         onClick = onRefresh,
                         icon = { Icon(Icons.Rounded.Refresh, contentDescription = "刷新下载状态") },
                     )
+                    IconActionSurface(
+                        onClick = onCheckUpdates,
+                        enabled = !isCheckingUpdates && !isSimulatingUpdate,
+                        icon = {
+                            if (isCheckingUpdates) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier
+                                        .width(18.dp)
+                                        .height(18.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Rounded.SystemUpdateAlt,
+                                    contentDescription = "检查已下载更新",
+                                )
+                            }
+                        },
+                    )
+                    if (showDebugActions) {
+                        IconActionSurface(
+                            onClick = onSimulateUpdate,
+                            enabled = !isCheckingUpdates && !isSimulatingUpdate,
+                            icon = {
+                                if (isSimulatingUpdate) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier
+                                            .width(18.dp)
+                                            .height(18.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Rounded.Restore,
+                                        contentDescription = "模拟有更新",
+                                    )
+                                }
+                            },
+                        )
+                    }
                     if (hasInactiveHistory) {
                         IconActionSurface(
                             onClick = onClearHistory,
@@ -929,6 +1032,252 @@ private fun DownloadsControlPanel(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CreateDownloadTaskSheet(
+    input: String,
+    onInputChange: (String) -> Unit,
+    isSubmitting: Boolean,
+    onSubmit: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 18.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text = "新建下载任务",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                text = "输入 publishedFileId，或直接粘贴工坊链接。解析成功后会按当前下载策略加入队列。",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        OutlinedTextField(
+            value = input,
+            onValueChange = onInputChange,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isSubmitting,
+            singleLine = true,
+            label = { Text("publishedFileId 或工坊链接") },
+            placeholder = { Text("例如：3688140356") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+        )
+
+        Text(
+            text = "支持纯数字 ID、`sharedfiles/filedetails/?id=...` 链接和 `steam://publishedfile/...`。",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            OutlinedButton(
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f),
+                enabled = !isSubmitting,
+            ) {
+                Text("取消")
+            }
+            Button(
+                onClick = onSubmit,
+                modifier = Modifier.weight(1f),
+                enabled = !isSubmitting,
+            ) {
+                if (isSubmitting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.width(18.dp).height(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Text("解析并加入")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DownloadedUpdatesSheet(
+    state: DownloadUpdatesDialogState,
+    onDismiss: () -> Unit,
+    onToggleSelection: (Long) -> Unit,
+    onUpdateAll: () -> Unit,
+    onUpdateSelected: () -> Unit,
+) {
+    val selectedCount = state.selectedPublishedFileIds.size
+    WorkshopNativeModalBottomSheet(
+        onDismissRequest = {
+            if (!state.isUpdating) {
+                onDismiss()
+            }
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 18.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "发现 ${state.candidates.size} 项可更新",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "已预选全部条目。你可以直接一键更新，也可以取消部分勾选后只更新所选内容。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (state.failedCount > 0) {
+                    Text(
+                        text = "另有 ${state.failedCount} 项暂时无法公开检查，已跳过。",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                state.candidates.forEach { candidate ->
+                    DownloadUpdateCandidateRow(
+                        candidate = candidate,
+                        selected = candidate.publishedFileId in state.selectedPublishedFileIds,
+                        enabled = !state.isUpdating,
+                        onToggle = { onToggleSelection(candidate.publishedFileId) },
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                        enabled = !state.isUpdating,
+                    ) {
+                        Text("取消")
+                    }
+                    OutlinedButton(
+                        onClick = onUpdateSelected,
+                        modifier = Modifier.weight(1f),
+                        enabled = !state.isUpdating && selectedCount > 0,
+                    ) {
+                        if (state.isUpdating) {
+                            CircularProgressIndicator(
+                                modifier = Modifier
+                                    .width(18.dp)
+                                    .height(18.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        } else {
+                            Text("更新所选")
+                        }
+                    }
+                }
+
+                Button(
+                    onClick = onUpdateAll,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !state.isUpdating && state.candidates.isNotEmpty(),
+                ) {
+                    if (state.isUpdating) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .width(18.dp)
+                                .height(18.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        Text("一键更新全部")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadUpdateCandidateRow(
+    candidate: DownloadedItemUpdateCandidate,
+    selected: Boolean,
+    enabled: Boolean,
+    onToggle: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onToggle),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ArtworkThumbnail(
+                imageUrl = candidate.previewUrl,
+                alternateImageUrl = candidate.appId.takeIf { it > 0 }?.let(::steamCapsuleUrl),
+                fallbackText = candidate.title,
+                modifier = Modifier
+                    .width(82.dp)
+                    .height(48.dp),
+                shape = RoundedCornerShape(16.dp),
+            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(
+                    text = candidate.title,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "PublishedFileId ${candidate.publishedFileId}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Checkbox(
+                checked = selected,
+                onCheckedChange = if (enabled) {
+                    { onToggle() }
+                } else {
+                    null
+                },
+                enabled = enabled,
+            )
         }
     }
 }
@@ -1026,12 +1375,17 @@ private fun DownloadTabChip(
 private fun IconActionSurface(
     onClick: () -> Unit,
     icon: @Composable () -> Unit,
+    enabled: Boolean = true,
     compact: Boolean = false,
 ) {
     Surface(
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
         shape = RoundedCornerShape(if (compact) 16.dp else 18.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        color = if (enabled) {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest
+        },
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
     ) {
         Box(
@@ -1052,14 +1406,23 @@ private fun ActionPillButton(
     onClick: () -> Unit,
     icon: (@Composable () -> Unit)?,
     label: String,
+    enabled: Boolean = true,
     compact: Boolean = false,
 ) {
     Surface(
-        modifier = modifier.clickable(onClick = onClick),
+        modifier = modifier.clickable(enabled = enabled, onClick = onClick),
         shape = RoundedCornerShape(18.dp),
-        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.72f)),
+        color = if (enabled) {
+            workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.72f))
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest
+        },
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
-        contentColor = MaterialTheme.colorScheme.onSurface,
+        contentColor = if (enabled) {
+            MaterialTheme.colorScheme.onSurface
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
     ) {
         Row(
             modifier = Modifier.padding(
@@ -1074,6 +1437,11 @@ private fun ActionPillButton(
                 text = label,
                 style = if (compact) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Medium,
+                color = if (enabled) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
             )
         }
     }
@@ -1422,6 +1790,11 @@ private fun resolvePublicDownloadsDirectoryUri(
 ): Uri? {
     if (task.targetTreeUri != null) return null
 
+    task.savedRelativePath
+        ?.takeIf { it.isNotBlank() }
+        ?.let(::buildExternalDownloadsDocumentUri)
+        ?.let { return it }
+
     val folderName = task.publicDownloadsFolderName() ?: return null
 
     task.savedFileUri
@@ -1634,7 +2007,7 @@ private fun DownloadTaskEntity.progressLabel(): String {
 }
 
 private fun DownloadTaskEntity.directoryActionCompactLabel(): String {
-    return if (canPreviewDirectoryInApp()) "结果" else "目录"
+    return if (canPreviewDirectoryInApp()) "结果" else "打开"
 }
 
 private fun DownloadTaskEntity.downloadAuthCompactLabel(): String {
@@ -1787,6 +2160,13 @@ private fun DownloadTaskEntity.cardTone(): DownloadCardTone {
 }
 
 private fun DownloadTaskEntity.supportingMessage(): String? {
+    if (status == DownloadStatus.Success) {
+        return buildList {
+            postProcessSummary?.takeIf { it.isNotBlank() }?.let(::add)
+            updateCheckError?.takeIf { it.isNotBlank() }?.let { add("更新检查失败：$it") }
+        }.joinToString("；").takeIf { it.isNotBlank() }
+    }
+
     val message = errorMessage?.trim().orEmpty()
     if (message.isBlank()) return null
 
@@ -1795,6 +2175,50 @@ private fun DownloadTaskEntity.supportingMessage(): String? {
     if (status == DownloadStatus.Cancelled && message == "已取消") return null
 
     return message
+}
+
+private fun DownloadTaskEntity.supportingMessageLabel(): String {
+    if (status != DownloadStatus.Success) return "错误信息"
+    val hasPostProcessSummary = !postProcessSummary.isNullOrBlank()
+    val hasUpdateError = !updateCheckError.isNullOrBlank()
+    return when {
+        hasPostProcessSummary && hasUpdateError -> "处理/更新"
+        hasPostProcessSummary -> "处理结果"
+        else -> "更新检查"
+    }
+}
+
+@Composable
+private fun UpdateAvailableBadge(
+    compact: Boolean,
+) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.3f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(
+                horizontal = if (compact) 8.dp else 9.dp,
+                vertical = if (compact) 4.dp else 5.dp,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.SystemUpdateAlt,
+                contentDescription = null,
+                modifier = Modifier.size(if (compact) 12.dp else 14.dp),
+                tint = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+            Text(
+                text = "可更新",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
 }
 
 private fun DownloadTaskEntity.isInSystemDownloads(): Boolean {
@@ -1825,7 +2249,7 @@ private fun DownloadTaskEntity.canOpenDirectory(): Boolean {
 }
 
 private fun DownloadTaskEntity.directoryActionLabel(): String {
-    return if (canPreviewDirectoryInApp()) "查看目录" else "打开目录"
+    return if (canPreviewDirectoryInApp()) "查看结果" else "打开结果"
 }
 
 private fun DownloadTaskEntity.canRetryFromHistory(): Boolean {

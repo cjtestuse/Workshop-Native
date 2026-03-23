@@ -1,11 +1,13 @@
 package com.slay.workshopnative
 
 import android.app.Application
+import androidx.hilt.work.HiltWorkerFactory
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.disk.DiskCache
 import coil3.memory.MemoryCache
-import androidx.hilt.work.HiltWorkerFactory
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.serviceLoaderEnabled
 import androidx.work.Configuration
 import com.slay.workshopnative.core.logging.AppLog
 import dagger.hilt.android.HiltAndroidApp
@@ -23,6 +25,10 @@ class WorkshopNativeApp : Application(), Configuration.Provider {
         AppLog.initialize(this)
         SingletonImageLoader.setSafe { context ->
             ImageLoader.Builder(context)
+                .serviceLoaderEnabled(false)
+                .components {
+                    add(OkHttpNetworkFetcherFactory())
+                }
                 .memoryCache {
                     MemoryCache.Builder()
                         .maxSizePercent(context, 0.2)

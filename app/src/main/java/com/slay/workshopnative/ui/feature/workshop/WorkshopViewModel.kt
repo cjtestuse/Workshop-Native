@@ -48,6 +48,7 @@ data class WorkshopUiState(
     val tagGroups: List<WorkshopBrowseTagGroup> = emptyList(),
     val supportsIncompatibleFilter: Boolean = false,
     val autoResolveDownloadInfo: Boolean = false,
+    val animatedWorkshopPreviewEnabled: Boolean = false,
     val isLoginFeatureEnabled: Boolean = false,
     val isLoggedInDownloadEnabled: Boolean = false,
     val isSubscriptionDisplayEnabled: Boolean = false,
@@ -60,6 +61,7 @@ data class WorkshopUiState(
     val descriptionTranslationByPublishedFileId: Map<Long, InlineTranslationState> = emptyMap(),
     val downloadTasksByPublishedFileId: Map<Long, DownloadTaskEntity> = emptyMap(),
     val queueingPublishedFileId: Long? = null,
+    val inlineStatusMessage: String? = null,
     val errorMessage: String? = null,
     val actionMessage: String? = null,
 )
@@ -82,6 +84,7 @@ class WorkshopViewModel @Inject constructor(
     private val metadataRequestsInFlight = mutableSetOf<Long>()
     private var workshopPageSize = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE
     private var autoResolveDownloadInfo = false
+    private var animatedWorkshopPreviewEnabled = false
     private var isLoginFeatureEnabled = false
     private var isLoggedInDownloadEnabled = false
     private var isSubscriptionDisplayEnabled = false
@@ -177,6 +180,7 @@ class WorkshopViewModel @Inject constructor(
                 tagGroups = emptyList(),
                 supportsIncompatibleFilter = false,
                 autoResolveDownloadInfo = autoResolveDownloadInfo,
+                animatedWorkshopPreviewEnabled = animatedWorkshopPreviewEnabled,
                 isLoginFeatureEnabled = isLoginFeatureEnabled,
                 isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
                 isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
@@ -185,6 +189,7 @@ class WorkshopViewModel @Inject constructor(
                 showSubscriptionState = shouldShowSubscriptionState(effectiveLaunchMode),
                 selectedItem = null,
                 queueingPublishedFileId = null,
+                inlineStatusMessage = null,
                 errorMessage = null,
                 actionMessage = blockedMessage,
             )
@@ -282,10 +287,11 @@ class WorkshopViewModel @Inject constructor(
 
     fun openItemDetails(item: WorkshopItem) {
         val cached = resolvedItemsCache[item.publishedFileId]
-        if (cached != null) {
+            ?.mergeBrowseState(item)
+        if (cached != null && !cached.needsWorkshopDetailRefresh()) {
             _uiState.update {
                 it.copy(
-                    selectedItem = cached.mergeBrowseState(item),
+                    selectedItem = cached,
                     isResolvingSelection = false,
                 )
             }
@@ -294,14 +300,14 @@ class WorkshopViewModel @Inject constructor(
 
         _uiState.update {
             it.copy(
-                selectedItem = item,
+                selectedItem = cached ?: item,
                 isResolvingSelection = true,
                 errorMessage = null,
             )
         }
 
         viewModelScope.launch {
-            steamRepository.resolveWorkshopItem(item.publishedFileId)
+            steamRepository.resolveWorkshopItemForDetails(item.publishedFileId)
                 .onSuccess { resolved ->
                     val merged = resolved.mergeBrowseState(item)
                     resolvedItemsCache[item.publishedFileId] = merged
@@ -528,6 +534,7 @@ class WorkshopViewModel @Inject constructor(
                 it.copy(
                     isRefreshing = showRefresh,
                     isLoadingMore = !showRefresh,
+                    inlineStatusMessage = null,
                     errorMessage = null,
                     actionMessage = null,
                 )
@@ -561,6 +568,11 @@ class WorkshopViewModel @Inject constructor(
                             isRefreshing = false,
                             isLoadingMore = false,
                             hasLoadedOnce = true,
+                            inlineStatusMessage = if (it.items.isEmpty()) {
+                                error.toUserMessage("读取创意工坊失败")
+                            } else {
+                                null
+                            },
                             errorMessage = error.toUserMessage("读取创意工坊失败"),
                         )
                     }
@@ -589,6 +601,7 @@ class WorkshopViewModel @Inject constructor(
                 periodOptions = page.periodOptions,
                 tagGroups = page.tagGroups,
                 supportsIncompatibleFilter = page.supportsIncompatibleFilter,
+                inlineStatusMessage = null,
             )
         }
         if (_uiState.value.autoResolveDownloadInfo) {
@@ -601,6 +614,7 @@ class WorkshopViewModel @Inject constructor(
             preferencesStore.preferences.collectLatest { prefs ->
                 val nextPageSize = prefs.workshopPageSize
                 val nextAutoResolve = prefs.workshopAutoResolveVisibleItems
+                val nextAnimatedPreviewEnabled = prefs.animatedWorkshopPreviewEnabled
                 isLoginFeatureEnabled = prefs.isLoginFeatureEnabled
                 isLoggedInDownloadEnabled = prefs.isLoggedInDownloadEnabled
                 isSubscriptionDisplayEnabled = prefs.isSubscriptionDisplayEnabled
@@ -609,13 +623,15 @@ class WorkshopViewModel @Inject constructor(
                 val current = _uiState.value
                 val pageSizeChanged = workshopPageSize != nextPageSize
                 val autoResolveChanged = autoResolveDownloadInfo != nextAutoResolve
+                val animatedPreviewChanged = animatedWorkshopPreviewEnabled != nextAnimatedPreviewEnabled
                 val subscriptionModeBlocked = current.launchMode == WorkshopLaunchMode.Subscriptions &&
                     !canUseSubscriptionFeatures()
                 val accountQueryModeBlocked = current.launchMode == WorkshopLaunchMode.AccountQuery &&
                     !canUseAccountQuery()
-                if (!pageSizeChanged && !autoResolveChanged) {
+                if (!pageSizeChanged && !autoResolveChanged && !animatedPreviewChanged) {
                     _uiState.update {
                         it.copy(
+                            animatedWorkshopPreviewEnabled = nextAnimatedPreviewEnabled,
                             isLoginFeatureEnabled = isLoginFeatureEnabled,
                             isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
                             isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
@@ -639,6 +655,7 @@ class WorkshopViewModel @Inject constructor(
 
                 workshopPageSize = nextPageSize
                 autoResolveDownloadInfo = nextAutoResolve
+                animatedWorkshopPreviewEnabled = nextAnimatedPreviewEnabled
 
                 _uiState.update { state ->
                     state.copy(
@@ -648,6 +665,7 @@ class WorkshopViewModel @Inject constructor(
                             state.query
                         },
                         autoResolveDownloadInfo = nextAutoResolve,
+                        animatedWorkshopPreviewEnabled = nextAnimatedPreviewEnabled,
                         isLoginFeatureEnabled = isLoginFeatureEnabled,
                         isLoggedInDownloadEnabled = isLoggedInDownloadEnabled,
                         isSubscriptionDisplayEnabled = isSubscriptionDisplayEnabled,
@@ -747,10 +765,18 @@ class WorkshopViewModel @Inject constructor(
             description = preferLongerWorkshopText(description, browseItem.description),
             previewUrl = browseItem.previewUrl ?: previewUrl,
             authorName = authorName.ifBlank { browseItem.authorName },
+            authorProfileUrl = authorProfileUrl ?: browseItem.authorProfileUrl,
             detailUrl = detailUrl ?: browseItem.detailUrl,
             isSubscribed = isSubscribed || browseItem.isSubscribed,
             isDownloadInfoResolved = isDownloadInfoResolved || browseItem.isDownloadInfoResolved,
         )
+    }
+
+    private fun WorkshopItem.needsWorkshopDetailRefresh(): Boolean {
+        return title.isBlank() ||
+            title.startsWith("Workshop #") ||
+            description.isBlank() ||
+            authorName.isBlank()
     }
 
     private fun preferLongerWorkshopText(

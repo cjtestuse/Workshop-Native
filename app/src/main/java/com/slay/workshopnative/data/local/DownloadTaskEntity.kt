@@ -49,7 +49,13 @@ data class DownloadTaskEntity(
     val bytesDownloaded: Long,
     val totalBytes: Long,
     val savedFileUri: String?,
+    val savedRelativePath: String?,
+    val postProcessSummary: String?,
     val errorMessage: String?,
+    val remoteUpdatedAt: Long?,
+    val lastUpdateCheckAt: Long?,
+    val hasUpdateAvailable: Boolean,
+    val updateCheckError: String?,
     val createdAt: Long,
     val updatedAt: Long,
 )

@@ -31,6 +31,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -78,6 +79,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
@@ -88,6 +90,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.slay.workshopnative.core.util.formatBytes
 import com.slay.workshopnative.core.util.formatEpochSeconds
+import com.slay.workshopnative.core.util.openUrlWithChooser
 import com.slay.workshopnative.core.util.textFingerprint
 import com.slay.workshopnative.data.local.DownloadStatus
 import com.slay.workshopnative.data.local.DownloadTaskEntity
@@ -100,6 +103,7 @@ import com.slay.workshopnative.data.model.WorkshopBrowseTagGroupSelectionMode
 import com.slay.workshopnative.data.model.WorkshopBrowseTagOption
 import com.slay.workshopnative.data.model.WorkshopDateRangeFilter
 import com.slay.workshopnative.data.model.WorkshopItem
+import com.slay.workshopnative.ui.components.AnimatedWorkshopThumbnail
 import com.slay.workshopnative.ui.components.ArtworkThumbnail
 import com.slay.workshopnative.ui.components.ExpandableBodyText
 import com.slay.workshopnative.ui.components.TranslatableDescriptionCard
@@ -129,6 +133,7 @@ fun WorkshopScreen(
     viewModel: WorkshopViewModel = hiltViewModel(),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val density = LocalDensity.current
     val listState = rememberLazyListState()
@@ -363,6 +368,27 @@ fun WorkshopScreen(
                             }
                         }
                     }
+                } else if (!state.inlineStatusMessage.isNullOrBlank()) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shape = RoundedCornerShape(24.dp),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(18.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = state.inlineStatusMessage.orEmpty(),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "可以返回探索页切换其他游戏，或稍后刷新再试。",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 } else {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -390,6 +416,7 @@ fun WorkshopScreen(
                             item = item,
                             showSubscriptionState = state.showSubscriptionState,
                             autoResolveDownloadInfo = state.autoResolveDownloadInfo,
+                            animatedPreviewEnabled = state.animatedWorkshopPreviewEnabled,
                             latestTask = state.downloadTasksByPublishedFileId[item.publishedFileId],
                             onClick = { viewModel.openItemDetails(item) },
                         )
@@ -543,6 +570,7 @@ fun WorkshopScreen(
         val description = item.description.ifBlank {
             item.shortDescription.ifBlank { "这个条目没有提供额外介绍。" }
         }
+        val authorProfileUrl = item.authorProfileUrlOrFallback()
         val translationState = state.descriptionTranslationByPublishedFileId[item.publishedFileId]
             ?.takeIf { it.sourceFingerprint == textFingerprint(description.trim()) }
         WorkshopNativeModalBottomSheet(onDismissRequest = viewModel::dismissItemDetails) {
@@ -550,12 +578,14 @@ fun WorkshopScreen(
                 item = item,
                 description = description,
                 translationState = translationState,
+                animatedPreviewEnabled = state.animatedWorkshopPreviewEnabled,
                 latestTask = state.downloadTasksByPublishedFileId[item.publishedFileId],
                 showSubscriptionState = state.showSubscriptionState,
                 downloadIdentityLabel = state.downloadIdentityLabel,
                 downloadIdentityDescription = state.downloadIdentityDescription,
                 isQueueing = state.queueingPublishedFileId == item.publishedFileId,
                 isResolving = state.isResolvingSelection,
+                authorProfileUrl = authorProfileUrl,
                 onTranslateDescription = {
                     viewModel.translateItemDescription(
                         publishedFileId = item.publishedFileId,
@@ -565,6 +595,14 @@ fun WorkshopScreen(
                 },
                 onShowOriginalDescription = { viewModel.showOriginalItemDescription(item.publishedFileId) },
                 onShowTranslatedDescription = { viewModel.showTranslatedItemDescription(item.publishedFileId) },
+                onOpenAuthorProfile = {
+                    authorProfileUrl?.let { profileUrl ->
+                        context.openUrlWithChooser(
+                            url = profileUrl,
+                            chooserTitle = "打开作者主页",
+                        )
+                    }
+                },
                 onDownload = { viewModel.enqueueDownload(item) },
                 onOpenDownloads = onOpenDownloads,
             )
@@ -1179,6 +1217,7 @@ private fun WorkshopListItem(
     item: WorkshopItem,
     showSubscriptionState: Boolean,
     autoResolveDownloadInfo: Boolean,
+    animatedPreviewEnabled: Boolean,
     latestTask: DownloadTaskEntity?,
     onClick: () -> Unit,
 ) {
@@ -1206,15 +1245,27 @@ private fun WorkshopListItem(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ArtworkThumbnail(
-                imageUrl = item.previewUrl,
-                fallbackText = item.title,
-                modifier = Modifier
-                    .width(78.dp)
-                    .height(50.dp),
-                shape = RoundedCornerShape(16.dp),
-                contentScale = ContentScale.Crop,
-            )
+            if (animatedPreviewEnabled) {
+                AnimatedWorkshopThumbnail(
+                    imageUrl = item.previewUrl,
+                    fallbackText = item.title,
+                    modifier = Modifier
+                        .width(78.dp)
+                        .height(50.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                ArtworkThumbnail(
+                    imageUrl = item.previewUrl,
+                    fallbackText = item.title,
+                    modifier = Modifier
+                        .width(78.dp)
+                        .height(50.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    contentScale = ContentScale.Crop,
+                )
+            }
 
             Column(
                 modifier = Modifier.weight(1f),
@@ -1364,20 +1415,24 @@ private fun WorkshopDetailSheet(
     item: WorkshopItem,
     description: String,
     translationState: com.slay.workshopnative.ui.InlineTranslationState?,
+    animatedPreviewEnabled: Boolean,
     latestTask: DownloadTaskEntity?,
     showSubscriptionState: Boolean,
     downloadIdentityLabel: String,
     downloadIdentityDescription: String,
     isQueueing: Boolean,
     isResolving: Boolean,
+    authorProfileUrl: String?,
     onTranslateDescription: () -> Unit,
     onShowOriginalDescription: () -> Unit,
     onShowTranslatedDescription: () -> Unit,
+    onOpenAuthorProfile: () -> Unit,
     onDownload: () -> Unit,
     onOpenDownloads: () -> Unit,
 ) {
     val hasActiveTask = latestTask?.status == DownloadStatus.Queued ||
         latestTask?.status == DownloadStatus.Running
+    val showAuthorCard = item.authorName.isNotBlank() || !authorProfileUrl.isNullOrBlank() || item.creatorSteamId > 0L
 
     Column(
         modifier = Modifier
@@ -1387,15 +1442,27 @@ private fun WorkshopDetailSheet(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Box {
-            ArtworkThumbnail(
-                imageUrl = item.previewUrl,
-                fallbackText = item.title,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(194.dp),
-                shape = RoundedCornerShape(30.dp),
-                contentScale = ContentScale.Fit,
-            )
+            if (animatedPreviewEnabled) {
+                AnimatedWorkshopThumbnail(
+                    imageUrl = item.previewUrl,
+                    fallbackText = item.title,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(194.dp),
+                    shape = RoundedCornerShape(30.dp),
+                    contentScale = ContentScale.Fit,
+                )
+            } else {
+                ArtworkThumbnail(
+                    imageUrl = item.previewUrl,
+                    fallbackText = item.title,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(194.dp),
+                    shape = RoundedCornerShape(30.dp),
+                    contentScale = ContentScale.Fit,
+                )
+            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1442,13 +1509,19 @@ private fun WorkshopDetailSheet(
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (item.authorName.isNotBlank()) {
-                InfoPill(text = item.authorName)
-            }
-            if (item.fileName != null) {
+        if (item.fileName != null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 InfoPill(text = item.fileName.orEmpty())
             }
+        }
+
+        if (showAuthorCard) {
+            WorkshopAuthorCard(
+                authorName = item.authorName.ifBlank { "Steam 创作者" },
+                authorProfileUrl = authorProfileUrl,
+                creatorSteamId = item.creatorSteamId,
+                onOpenAuthorProfile = onOpenAuthorProfile,
+            )
         }
 
         if (isResolving) {
@@ -1706,6 +1779,72 @@ private fun WorkshopOverviewCard(
                     label = "订阅数量",
                     value = if (item.subscriptions > 0) item.subscriptions.toString() else "暂无",
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkshopAuthorCard(
+    authorName: String,
+    authorProfileUrl: String?,
+    creatorSteamId: Long,
+    onOpenAuthorProfile: () -> Unit,
+) {
+    val canOpenAuthorProfile = !authorProfileUrl.isNullOrBlank()
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = canOpenAuthorProfile, onClick = onOpenAuthorProfile),
+        color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.8f)),
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.4f))),
+        contentColor = MaterialTheme.colorScheme.onSurface,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = "作者",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = authorName,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = when {
+                        canOpenAuthorProfile -> "点击查看作者 Steam 主页"
+                        creatorSteamId > 0L -> "作者主页链接暂不可用"
+                        else -> "当前条目没有提供更多作者资料"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (canOpenAuthorProfile) {
+                OutlinedButton(
+                    onClick = onOpenAuthorProfile,
+                    shape = RoundedCornerShape(18.dp),
+                ) {
+                    Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null)
+                    Text(
+                        text = "主页",
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
             }
         }
     }
@@ -2922,6 +3061,13 @@ private fun WorkshopDateRangeFilter.detailLabel(): String {
         endLabel != null -> "$endLabel 之前"
         else -> ""
     }
+}
+
+private fun WorkshopItem.authorProfileUrlOrFallback(): String? {
+    return authorProfileUrl?.takeIf(String::isNotBlank)
+        ?: creatorSteamId.takeIf { it > 0L }?.let { steamId64 ->
+            "https://steamcommunity.com/profiles/$steamId64/"
+        }
 }
 
 private fun Long.formatWorkshopDateOrDefault(): String {

@@ -127,6 +127,10 @@ class SteamRepositoryImpl @Inject constructor(
         return runCatching { sessionManager.resolveWorkshopItem(publishedFileId) }
     }
 
+    override suspend fun resolveWorkshopItemForDetails(publishedFileId: Long): Result<WorkshopItem> {
+        return runCatching { sessionManager.resolveWorkshopItemForDetails(publishedFileId) }
+    }
+
     override suspend fun resolveWorkshopItemsForDownload(
         publishedFileIds: Collection<Long>,
     ): Result<List<WorkshopItem>> {

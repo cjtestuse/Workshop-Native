@@ -8,6 +8,7 @@ data class WorkshopItem(
     val description: String,
     val previewUrl: String?,
     val authorName: String = "",
+    val authorProfileUrl: String? = null,
     val detailUrl: String? = null,
     val fileUrl: String?,
     val fileName: String?,

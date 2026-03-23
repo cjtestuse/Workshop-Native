@@ -31,9 +31,10 @@ import kotlinx.coroutines.sync.withLock
 
 const val DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY = 12
 const val COMPATIBILITY_DOWNLOAD_CHUNK_CONCURRENCY = 4
+const val PRIMORDIAL_DOWNLOAD_CHUNK_CONCURRENCY = 24
 const val MIN_DOWNLOAD_CHUNK_CONCURRENCY = 1
-const val MAX_DOWNLOAD_CHUNK_CONCURRENCY = 12
-val DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS = listOf(1, 2, 4, 6, 8, 12)
+const val MAX_DOWNLOAD_CHUNK_CONCURRENCY = 24
+val DOWNLOAD_CHUNK_CONCURRENCY_OPTIONS = listOf(1, 2, 4, 6, 8, 12, 16, 24)
 
 enum class CdnTransportPreference {
     Auto,
@@ -52,6 +53,7 @@ enum class CdnPoolPreference {
 enum class DownloadPerformanceMode {
     Auto,
     Compatibility,
+    Primordial,
 }
 
 fun normalizeDownloadChunkConcurrency(value: Int): Int {
@@ -62,6 +64,7 @@ fun requestedDownloadChunkConcurrency(mode: DownloadPerformanceMode): Int {
     return when (mode) {
         DownloadPerformanceMode.Auto -> DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY
         DownloadPerformanceMode.Compatibility -> COMPATIBILITY_DOWNLOAD_CHUNK_CONCURRENCY
+        DownloadPerformanceMode.Primordial -> PRIMORDIAL_DOWNLOAD_CHUNK_CONCURRENCY
     }
 }
 
@@ -97,6 +100,8 @@ data class UserPreferences(
     val hasAcknowledgedDisclaimer: Boolean = false,
     val hasAcknowledgedUsageBoundary: Boolean = false,
     val autoCheckAppUpdates: Boolean = false,
+    val autoCheckDownloadedModUpdatesOnLaunch: Boolean = false,
+    val lastDownloadedModUpdatesLaunchCheckAtMs: Long = 0L,
     val defaultGuestMode: Boolean = true,
     val lastConnectionProfileLabel: String? = null,
     val lastCdnHost: String? = null,
@@ -108,10 +113,19 @@ data class UserPreferences(
     val downloadTreeLabel: String? = null,
     val downloadPerformanceMode: DownloadPerformanceMode = DownloadPerformanceMode.Auto,
     val downloadChunkConcurrency: Int = DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY,
+    val primordialReducedMemoryProtectionEnabled: Boolean = false,
+    val primordialAuthenticatedAggressiveCdnEnabled: Boolean = false,
     val preferAnonymousDownloads: Boolean = true,
     val allowAuthenticatedDownloadFallback: Boolean = true,
     val workshopPageSize: Int = WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
     val workshopAutoResolveVisibleItems: Boolean = false,
+    val animatedWorkshopPreviewEnabled: Boolean = false,
+    val terrariaArchivePostProcessorEnabled: Boolean = false,
+    val terrariaArchiveKeepOriginal: Boolean = false,
+    val wallpaperEnginePkgExtractEnabled: Boolean = false,
+    val wallpaperEnginePkgKeepOriginal: Boolean = false,
+    val wallpaperEngineTexConversionEnabled: Boolean = false,
+    val wallpaperEngineKeepConvertedTexOriginal: Boolean = true,
     val translationProvider: TranslationProvider = DEFAULT_TRANSLATION_PROVIDER,
     val translationAzureEndpoint: String = DEFAULT_AZURE_TRANSLATOR_ENDPOINT,
     val translationAzureRegion: String = "",
@@ -154,6 +168,10 @@ class UserPreferencesStore @Inject constructor(
         val HAS_ACKNOWLEDGED_DISCLAIMER = booleanPreferencesKey("has_acknowledged_disclaimer")
         val HAS_ACKNOWLEDGED_USAGE_BOUNDARY = booleanPreferencesKey("has_acknowledged_usage_boundary")
         val AUTO_CHECK_APP_UPDATES = booleanPreferencesKey("auto_check_app_updates")
+        val AUTO_CHECK_DOWNLOADED_MOD_UPDATES_ON_LAUNCH =
+            booleanPreferencesKey("auto_check_downloaded_mod_updates_on_launch")
+        val LAST_DOWNLOADED_MOD_UPDATES_LAUNCH_CHECK_AT_MS =
+            longPreferencesKey("last_downloaded_mod_updates_launch_check_at_ms")
         val DEFAULT_GUEST_MODE = booleanPreferencesKey("default_guest_mode")
         val LAST_CONNECTION_PROFILE = stringPreferencesKey("last_connection_profile")
         val LAST_CDN_HOST = stringPreferencesKey("last_cdn_host")
@@ -165,10 +183,27 @@ class UserPreferencesStore @Inject constructor(
         val DOWNLOAD_TREE_LABEL = stringPreferencesKey("download_tree_label")
         val DOWNLOAD_PERFORMANCE_MODE = stringPreferencesKey("download_performance_mode")
         val DOWNLOAD_CHUNK_CONCURRENCY = intPreferencesKey("download_chunk_concurrency")
+        val PRIMORDIAL_REDUCED_MEMORY_PROTECTION_ENABLED =
+            booleanPreferencesKey("primordial_reduced_memory_protection_enabled")
+        val PRIMORDIAL_AUTHENTICATED_AGGRESSIVE_CDN_ENABLED =
+            booleanPreferencesKey("primordial_authenticated_aggressive_cdn_enabled")
         val PREFER_ANONYMOUS_DOWNLOADS = booleanPreferencesKey("prefer_anonymous_downloads")
         val ALLOW_AUTHENTICATED_DOWNLOAD_FALLBACK = booleanPreferencesKey("allow_authenticated_download_fallback")
         val WORKSHOP_PAGE_SIZE = intPreferencesKey("workshop_page_size")
         val WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS = booleanPreferencesKey("workshop_auto_resolve_visible_items")
+        val ANIMATED_WORKSHOP_PREVIEW_ENABLED = booleanPreferencesKey("animated_workshop_preview_enabled")
+        val TERRARIA_ARCHIVE_POST_PROCESSOR_ENABLED =
+            booleanPreferencesKey("terraria_archive_post_processor_enabled")
+        val TERRARIA_ARCHIVE_KEEP_ORIGINAL =
+            booleanPreferencesKey("terraria_archive_keep_original")
+        val WALLPAPER_ENGINE_PKG_EXTRACT_ENABLED =
+            booleanPreferencesKey("wallpaper_engine_pkg_extract_enabled")
+        val WALLPAPER_ENGINE_PKG_KEEP_ORIGINAL =
+            booleanPreferencesKey("wallpaper_engine_pkg_keep_original")
+        val WALLPAPER_ENGINE_TEX_CONVERSION_ENABLED =
+            booleanPreferencesKey("wallpaper_engine_tex_conversion_enabled")
+        val WALLPAPER_ENGINE_KEEP_CONVERTED_TEX_ORIGINAL =
+            booleanPreferencesKey("wallpaper_engine_keep_converted_tex_original")
         val TRANSLATION_PROVIDER = stringPreferencesKey("translation_provider")
         val TRANSLATION_AZURE_ENDPOINT = stringPreferencesKey("translation_azure_endpoint")
         val TRANSLATION_AZURE_REGION = stringPreferencesKey("translation_azure_region")
@@ -244,6 +279,10 @@ class UserPreferencesStore @Inject constructor(
                 hasAcknowledgedDisclaimer = prefs[HAS_ACKNOWLEDGED_DISCLAIMER] ?: false,
                 hasAcknowledgedUsageBoundary = prefs[HAS_ACKNOWLEDGED_USAGE_BOUNDARY] ?: false,
                 autoCheckAppUpdates = prefs[AUTO_CHECK_APP_UPDATES] ?: false,
+                autoCheckDownloadedModUpdatesOnLaunch =
+                    prefs[AUTO_CHECK_DOWNLOADED_MOD_UPDATES_ON_LAUNCH] ?: false,
+                lastDownloadedModUpdatesLaunchCheckAtMs =
+                    prefs[LAST_DOWNLOADED_MOD_UPDATES_LAUNCH_CHECK_AT_MS] ?: 0L,
                 defaultGuestMode = prefs[DEFAULT_GUEST_MODE] ?: true,
                 lastConnectionProfileLabel = prefs[LAST_CONNECTION_PROFILE],
                 lastCdnHost = prefs[LAST_CDN_HOST],
@@ -259,12 +298,27 @@ class UserPreferencesStore @Inject constructor(
                 downloadTreeLabel = sanitizedDownloadTree.second,
                 downloadPerformanceMode = downloadPerformanceMode,
                 downloadChunkConcurrency = requestedDownloadChunkConcurrency(downloadPerformanceMode),
+                primordialReducedMemoryProtectionEnabled =
+                    prefs[PRIMORDIAL_REDUCED_MEMORY_PROTECTION_ENABLED] ?: false,
+                primordialAuthenticatedAggressiveCdnEnabled =
+                    prefs[PRIMORDIAL_AUTHENTICATED_AGGRESSIVE_CDN_ENABLED] ?: false,
                 preferAnonymousDownloads = prefs[PREFER_ANONYMOUS_DOWNLOADS] ?: true,
                 allowAuthenticatedDownloadFallback = prefs[ALLOW_AUTHENTICATED_DOWNLOAD_FALLBACK] ?: true,
                 workshopPageSize = WorkshopBrowseQuery.normalizePageSize(
                     prefs[WORKSHOP_PAGE_SIZE] ?: WorkshopBrowseQuery.DEFAULT_PAGE_SIZE,
                 ),
                 workshopAutoResolveVisibleItems = prefs[WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS] ?: false,
+                animatedWorkshopPreviewEnabled = prefs[ANIMATED_WORKSHOP_PREVIEW_ENABLED] ?: false,
+                terrariaArchivePostProcessorEnabled =
+                    prefs[TERRARIA_ARCHIVE_POST_PROCESSOR_ENABLED] ?: false,
+                terrariaArchiveKeepOriginal = prefs[TERRARIA_ARCHIVE_KEEP_ORIGINAL] ?: false,
+                wallpaperEnginePkgExtractEnabled =
+                    prefs[WALLPAPER_ENGINE_PKG_EXTRACT_ENABLED] ?: false,
+                wallpaperEnginePkgKeepOriginal = prefs[WALLPAPER_ENGINE_PKG_KEEP_ORIGINAL] ?: false,
+                wallpaperEngineTexConversionEnabled =
+                    prefs[WALLPAPER_ENGINE_TEX_CONVERSION_ENABLED] ?: false,
+                wallpaperEngineKeepConvertedTexOriginal =
+                    prefs[WALLPAPER_ENGINE_KEEP_CONVERTED_TEX_ORIGINAL] ?: true,
                 translationProvider = translationProvider,
                 translationAzureEndpoint = prefs[TRANSLATION_AZURE_ENDPOINT]
                     ?.trim()
@@ -530,6 +584,18 @@ class UserPreferencesStore @Inject constructor(
         }
     }
 
+    suspend fun saveAutoCheckDownloadedModUpdatesOnLaunch(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[AUTO_CHECK_DOWNLOADED_MOD_UPDATES_ON_LAUNCH] = enabled
+        }
+    }
+
+    suspend fun saveLastDownloadedModUpdatesLaunchCheckAt(timestampMs: Long) {
+        dataStore.edit { prefs ->
+            prefs[LAST_DOWNLOADED_MOD_UPDATES_LAUNCH_CHECK_AT_MS] = timestampMs
+        }
+    }
+
     suspend fun saveAppThemeMode(themeMode: AppThemeMode) {
         dataStore.edit { prefs ->
             prefs[APP_THEME_MODE] = themeMode.name
@@ -569,10 +635,11 @@ class UserPreferencesStore @Inject constructor(
     }
 
     suspend fun saveDownloadChunkConcurrency(concurrency: Int) {
-        val mode = if (normalizeDownloadChunkConcurrency(concurrency) <= COMPATIBILITY_DOWNLOAD_CHUNK_CONCURRENCY) {
-            DownloadPerformanceMode.Compatibility
-        } else {
-            DownloadPerformanceMode.Auto
+        val normalized = normalizeDownloadChunkConcurrency(concurrency)
+        val mode = when {
+            normalized <= COMPATIBILITY_DOWNLOAD_CHUNK_CONCURRENCY -> DownloadPerformanceMode.Compatibility
+            normalized > DEFAULT_DOWNLOAD_CHUNK_CONCURRENCY -> DownloadPerformanceMode.Primordial
+            else -> DownloadPerformanceMode.Auto
         }
         saveDownloadPerformanceMode(mode)
     }
@@ -581,6 +648,18 @@ class UserPreferencesStore @Inject constructor(
         dataStore.edit { prefs ->
             prefs[DOWNLOAD_PERFORMANCE_MODE] = mode.name
             prefs[DOWNLOAD_CHUNK_CONCURRENCY] = requestedDownloadChunkConcurrency(mode)
+        }
+    }
+
+    suspend fun savePrimordialReducedMemoryProtectionEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[PRIMORDIAL_REDUCED_MEMORY_PROTECTION_ENABLED] = enabled
+        }
+    }
+
+    suspend fun savePrimordialAuthenticatedAggressiveCdnEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[PRIMORDIAL_AUTHENTICATED_AGGRESSIVE_CDN_ENABLED] = enabled
         }
     }
 
@@ -605,6 +684,48 @@ class UserPreferencesStore @Inject constructor(
     suspend fun saveWorkshopAutoResolveVisibleItems(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[WORKSHOP_AUTO_RESOLVE_VISIBLE_ITEMS] = enabled
+        }
+    }
+
+    suspend fun saveAnimatedWorkshopPreviewEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[ANIMATED_WORKSHOP_PREVIEW_ENABLED] = enabled
+        }
+    }
+
+    suspend fun saveTerrariaArchivePostProcessorEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[TERRARIA_ARCHIVE_POST_PROCESSOR_ENABLED] = enabled
+        }
+    }
+
+    suspend fun saveTerrariaArchiveKeepOriginal(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[TERRARIA_ARCHIVE_KEEP_ORIGINAL] = enabled
+        }
+    }
+
+    suspend fun saveWallpaperEnginePkgExtractEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[WALLPAPER_ENGINE_PKG_EXTRACT_ENABLED] = enabled
+        }
+    }
+
+    suspend fun saveWallpaperEnginePkgKeepOriginal(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[WALLPAPER_ENGINE_PKG_KEEP_ORIGINAL] = enabled
+        }
+    }
+
+    suspend fun saveWallpaperEngineTexConversionEnabled(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[WALLPAPER_ENGINE_TEX_CONVERSION_ENABLED] = enabled
+        }
+    }
+
+    suspend fun saveWallpaperEngineKeepConvertedTexOriginal(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[WALLPAPER_ENGINE_KEEP_CONVERTED_TEX_ORIGINAL] = enabled
         }
     }
 

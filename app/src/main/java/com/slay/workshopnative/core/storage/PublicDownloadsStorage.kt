@@ -52,6 +52,24 @@ fun uniqueMediaStoreRootName(
     return "$safeBaseRootName ($index)"
 }
 
+fun uniqueMediaStoreRootNameWithTimestampFallback(
+    context: Context,
+    folderName: String?,
+    baseRootName: String,
+    timestampMs: Long = System.currentTimeMillis(),
+): String {
+    var candidate = appendTimestampSuffix(baseRootName, timestampMs)
+    if (!mediaStoreDirectoryExists(context, folderName, candidate)) {
+        return candidate
+    }
+
+    var index = 1
+    while (mediaStoreDirectoryExists(context, folderName, "${candidate}_$index")) {
+        index++
+    }
+    return "${candidate}_$index"
+}
+
 fun createMediaStoreFileOutput(
     context: Context,
     folderName: String?,

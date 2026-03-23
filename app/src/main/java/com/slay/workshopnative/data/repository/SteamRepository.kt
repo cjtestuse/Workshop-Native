@@ -71,6 +71,8 @@ interface SteamRepository {
 
     suspend fun resolveWorkshopItem(publishedFileId: Long): Result<WorkshopItem>
 
+    suspend fun resolveWorkshopItemForDetails(publishedFileId: Long): Result<WorkshopItem>
+
     suspend fun resolveWorkshopItemsForDownload(publishedFileIds: Collection<Long>): Result<List<WorkshopItem>>
 
     suspend fun resolveWorkshopItemForDownload(publishedFileId: Long): Result<WorkshopItem>

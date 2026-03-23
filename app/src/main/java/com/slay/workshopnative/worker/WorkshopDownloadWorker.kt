@@ -190,6 +190,8 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                 taskId = taskId,
                 status = DownloadStatus.Success,
                 savedFileUri = completed.savedUri,
+                savedRelativePath = completed.savedRelativePath,
+                postProcessSummary = completed.postProcessSummary,
                 errorMessage = null,
                 progressPercent = 100,
                 bytesDownloaded = completed.bytesDownloaded,
@@ -236,6 +238,8 @@ class WorkshopDownloadWorker @AssistedInject constructor(
                         taskId = taskId,
                         status = status,
                         savedFileUri = latest.savedFileUri,
+                        savedRelativePath = latest.savedRelativePath,
+                        postProcessSummary = latest.postProcessSummary,
                         errorMessage = throwable.toUserMessage("下载失败"),
                         progressPercent = latest.progressPercent,
                         bytesDownloaded = latest.bytesDownloaded,
@@ -550,7 +554,7 @@ class WorkshopDownloadWorker @AssistedInject constructor(
         var totalBytes = fallbackTotalBytes.coerceAtLeast(0L)
         val progressReporter = RunningProgressReporter(taskId = taskId, title = title)
 
-        val savedUri = try {
+        val exportResult = try {
             steamSessionManager.downloadWorkshopItem(
                 item = WorkshopItem(
                     publishedFileId = publishedFileId,
@@ -636,7 +640,9 @@ class WorkshopDownloadWorker @AssistedInject constructor(
         }
 
         return CompletedDownload(
-            savedUri = savedUri,
+            savedUri = exportResult.savedUri,
+            savedRelativePath = exportResult.savedRelativePath,
+            postProcessSummary = exportResult.postProcessSummary,
             bytesDownloaded = bytesDownloaded,
             totalBytes = totalBytes,
         ).also {
@@ -793,6 +799,8 @@ class WorkshopDownloadWorker @AssistedInject constructor(
 
     private data class CompletedDownload(
         val savedUri: String,
+        val savedRelativePath: String? = null,
+        val postProcessSummary: String? = null,
         val bytesDownloaded: Long,
         val totalBytes: Long,
     )

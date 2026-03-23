@@ -135,7 +135,7 @@ fun ExploreScreen(
                         CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.6.dp)
                         Text(
                             text = if (state.isSearching) {
-                                "正在搜索公开创意工坊游戏…"
+                                "正在搜索 Steam 游戏…"
                             } else {
                                 "正在读取最近热门的工坊游戏…"
                             },
@@ -165,7 +165,7 @@ fun ExploreScreen(
                         )
                         Text(
                                 text = state.errorMessage ?: if (state.isSearching) {
-                                    "试试换个关键词继续搜索，这里会查整个公开工坊游戏列表，不只是当前页。"
+                                    "试试换个关键词继续搜索，这里会查 Steam 游戏库，不只限当前热门页。"
                                 } else {
                                     "稍后刷新或切换页码再试。"
                                 },
@@ -391,7 +391,7 @@ private fun ExploreControlPanel(
                         .padding(horizontal = 8.dp, vertical = 6.dp),
                     placeholder = {
                         Text(
-                            text = "按名称搜索公开工坊游戏",
+                            text = "按名称搜索 Steam 游戏",
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )

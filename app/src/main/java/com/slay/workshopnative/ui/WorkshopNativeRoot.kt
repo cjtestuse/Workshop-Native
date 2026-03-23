@@ -69,7 +69,9 @@ import com.slay.workshopnative.data.model.SessionStatus
 import com.slay.workshopnative.data.model.SteamSessionState
 import com.slay.workshopnative.core.util.openUrlWithChooser
 import com.slay.workshopnative.ui.components.WorkshopBackdrop
+import com.slay.workshopnative.ui.feature.downloads.DownloadedUpdatesSheet
 import com.slay.workshopnative.ui.feature.downloads.DownloadsScreen
+import com.slay.workshopnative.ui.feature.downloads.DownloadsViewModel
 import com.slay.workshopnative.ui.feature.explore.ExploreScreen
 import com.slay.workshopnative.ui.feature.library.LibraryScreen
 import com.slay.workshopnative.ui.feature.login.LoginScreen
@@ -137,6 +139,7 @@ fun WorkshopNativeRoot(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val downloadsViewModel: DownloadsViewModel = hiltViewModel()
     val sessionState by viewModel.sessionState.collectAsStateWithLifecycle()
     val isBootstrapping by viewModel.isBootstrapping.collectAsStateWithLifecycle()
     val guestMode by viewModel.guestMode.collectAsStateWithLifecycle()
@@ -150,6 +153,7 @@ fun WorkshopNativeRoot(
     val activeWorkshopAppId by viewModel.activeWorkshopAppId.collectAsStateWithLifecycle()
     val activeWorkshopAppName by viewModel.activeWorkshopAppName.collectAsStateWithLifecycle()
     val activeWorkshopMode by viewModel.activeWorkshopMode.collectAsStateWithLifecycle()
+    val downloadUpdatesDialogState by downloadsViewModel.downloadUpdatesDialogState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     var appUnlocked by rememberSaveable { mutableStateOf(false) }
     var forceLoginScreen by rememberSaveable { mutableStateOf(false) }
@@ -240,6 +244,22 @@ fun WorkshopNativeRoot(
         hasAcknowledgedUsageBoundary == false &&
         !showStartupOverlay &&
         !showRestoreScreen
+
+    LaunchedEffect(
+        showApplicationShell,
+        showDisclaimerDialog,
+        showUsageBoundaryDialog,
+        appUpdateState.showUpdateDialog,
+    ) {
+        if (
+            showApplicationShell &&
+            !showDisclaimerDialog &&
+            !showUsageBoundaryDialog &&
+            !appUpdateState.showUpdateDialog
+        ) {
+            downloadsViewModel.maybeAutoCheckDownloadedItemsForUpdatesOnStartup()
+        }
+    }
 
     if (!showApplicationShell) {
         if (showStartupOverlay) {
@@ -399,7 +419,10 @@ fun WorkshopNativeRoot(
                         }
 
                         RootTab.Downloads -> {
-                            DownloadsScreen(paddingValues = shellPadding)
+                            DownloadsScreen(
+                                paddingValues = shellPadding,
+                                viewModel = downloadsViewModel,
+                            )
                         }
 
                         RootTab.Settings -> {
@@ -456,6 +479,15 @@ fun WorkshopNativeRoot(
                     openExternalUrl(downloadUrl)
                 },
             )
+            if (downloadUpdatesDialogState.isVisible && !appUpdateState.showUpdateDialog) {
+                DownloadedUpdatesSheet(
+                    state = downloadUpdatesDialogState,
+                    onDismiss = downloadsViewModel::dismissDownloadUpdatesDialog,
+                    onToggleSelection = downloadsViewModel::toggleDownloadUpdateSelection,
+                    onUpdateAll = downloadsViewModel::enqueueAllDownloadUpdates,
+                    onUpdateSelected = downloadsViewModel::enqueueSelectedDownloadUpdates,
+                )
+            }
         }
     }
 }
@@ -1096,13 +1128,21 @@ private fun SessionStateBanner(
     onShowLogin: () -> Unit,
 ) {
     val isRecovering = sessionState.isRestoring || sessionState.status == SessionStatus.Connecting
+    val containerColor = workshopAdaptiveSurfaceColor(
+        light = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+        dark = Color(0xFF182233).copy(alpha = 0.97f),
+    )
+    val borderColor = workshopAdaptiveBorderColor(
+        light = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f),
+        dark = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.52f),
+    )
     Surface(
         modifier = modifier,
-        color = Color(0xFF182233).copy(alpha = 0.97f),
+        color = containerColor,
         shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
         tonalElevation = 0.dp,
         shadowElevation = 8.dp,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.52f)),
+        border = BorderStroke(1.dp, borderColor),
     ) {
         if (isRecovering) {
             Row(

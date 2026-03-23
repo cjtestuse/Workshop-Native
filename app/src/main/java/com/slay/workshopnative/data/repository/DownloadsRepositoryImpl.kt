@@ -132,10 +132,16 @@ class DownloadsRepositoryImpl @Inject constructor(
                     bytesDownloaded = 0,
                     totalBytes = preparedItem.fileSize,
                     savedFileUri = null,
+                    savedRelativePath = null,
+                    postProcessSummary = null,
                     errorMessage = "该条目既没有公开直链，也没有可用的 Steam 内容 manifest",
-                    createdAt = now,
-                    updatedAt = now,
-                ),
+                    remoteUpdatedAt = preparedItem.timeUpdated.takeIf { it > 0L },
+                lastUpdateCheckAt = null,
+                hasUpdateAvailable = false,
+                updateCheckError = null,
+                createdAt = now,
+                updatedAt = now,
+            ),
             )
             return Result.failure(IllegalStateException("该条目当前不可下载"))
         }
@@ -202,7 +208,13 @@ class DownloadsRepositoryImpl @Inject constructor(
                 bytesDownloaded = 0,
                 totalBytes = preparedItem.fileSize,
                 savedFileUri = null,
+                savedRelativePath = null,
+                postProcessSummary = null,
                 errorMessage = null,
+                remoteUpdatedAt = preparedItem.timeUpdated.takeIf { it > 0L },
+                lastUpdateCheckAt = null,
+                hasUpdateAvailable = false,
+                updateCheckError = null,
                 createdAt = now,
                 updatedAt = now,
             ),
@@ -217,6 +229,11 @@ class DownloadsRepositoryImpl @Inject constructor(
                 "hasBindingHash" to (!boundAccountKeyHash.isNullOrBlank()).toString(),
             ),
         )
+        val shouldPrewarmAnonymousAccess =
+            authMode != DownloadAuthMode.Authenticated || prefs.allowAuthenticatedDownloadFallback
+        if (shouldPrewarmAnonymousAccess) {
+            steamRepository.prewarmAnonymousDownloadAccess()
+        }
 
         workManager.enqueueUniqueWork(
             taskId,
@@ -323,6 +340,10 @@ class DownloadsRepositoryImpl @Inject constructor(
                 runtimeAttemptCount = 0,
                 runtimeChunkConcurrency = 0,
                 runtimeLastFailure = null,
+                remoteUpdatedAt = latestItem?.timeUpdated?.takeIf { it > 0L } ?: existing.remoteUpdatedAt,
+                lastUpdateCheckAt = existing.lastUpdateCheckAt,
+                hasUpdateAvailable = false,
+                updateCheckError = null,
                 updatedAt = System.currentTimeMillis(),
             ),
         )
@@ -364,6 +385,8 @@ class DownloadsRepositoryImpl @Inject constructor(
             taskId = taskId,
             status = DownloadStatus.Cancelled,
             savedFileUri = existing.savedFileUri,
+            savedRelativePath = existing.savedRelativePath,
+            postProcessSummary = existing.postProcessSummary,
             errorMessage = "已取消",
             progressPercent = existing.progressPercent,
             bytesDownloaded = existing.bytesDownloaded,
@@ -400,6 +423,136 @@ class DownloadsRepositoryImpl @Inject constructor(
     override suspend fun clearInactiveDiagnostics(): Int = withContext(Dispatchers.IO) {
         supportDiagnosticsStore.recordDownloadEvent(action = "clear_inactive_diagnostics")
         downloadTaskDao.clearInactiveRuntimeDetails(updatedAt = System.currentTimeMillis())
+    }
+
+    override suspend fun checkDownloadedItemsForUpdates(): Result<DownloadedItemsUpdateCheckResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val successfulTasks = downloadTaskDao.getSuccessfulTasks()
+                .filter { it.publishedFileId > 0L }
+            if (successfulTasks.isEmpty()) {
+                return@runCatching DownloadedItemsUpdateCheckResult(
+                    summary = DownloadedItemsUpdateCheckSummary(
+                        requestedCount = 0,
+                        checkedCount = 0,
+                        updateAvailableCount = 0,
+                        failedCount = 0,
+                    ),
+                    updateCandidates = emptyList(),
+                )
+            }
+
+            val successfulTasksById = successfulTasks.groupBy(DownloadTaskEntity::publishedFileId)
+            val latestSuccessfulTasksById = successfulTasksById
+                .mapValues { (_, tasks) ->
+                    tasks.maxByOrNull { it.updatedAt } ?: tasks.first()
+                }
+            val requestedIds = latestSuccessfulTasksById.keys.toList()
+            val now = System.currentTimeMillis()
+            var checkedCount = 0
+            var updateAvailableCount = 0
+            var failedCount = 0
+            val updateCandidates = linkedMapOf<Long, DownloadedItemUpdateCandidate>()
+
+            requestedIds.chunked(50).forEach { batchIds ->
+                steamRepository.resolveWorkshopItems(batchIds)
+                    .onSuccess { remoteItems ->
+                        val remoteById = remoteItems.associateBy(WorkshopItem::publishedFileId)
+                        batchIds.forEach { publishedFileId ->
+                            val task = latestSuccessfulTasksById[publishedFileId] ?: return@forEach
+                            val remoteItem = remoteById[publishedFileId]
+                            if (remoteItem == null) {
+                                failedCount += 1
+                                successfulTasksById[publishedFileId].orEmpty().forEach { groupedTask ->
+                                    downloadTaskDao.updateUpdateCheckState(
+                                        taskId = groupedTask.taskId,
+                                        lastUpdateCheckAt = now,
+                                        hasUpdateAvailable = false,
+                                        updateCheckError = "无法通过公开工坊读取这个条目",
+                                    )
+                                }
+                                return@forEach
+                            }
+
+                            checkedCount += 1
+                            val baselineUpdatedAt = task.remoteUpdatedAt ?: task.updatedAt
+                            val hasUpdateAvailable = remoteItem.timeUpdated > baselineUpdatedAt
+                            if (hasUpdateAvailable) {
+                                updateAvailableCount += 1
+                                updateCandidates[publishedFileId] = DownloadedItemUpdateCandidate(
+                                    publishedFileId = remoteItem.publishedFileId,
+                                    appId = remoteItem.appId,
+                                    title = task.title,
+                                    previewUrl = task.previewUrl ?: remoteItem.previewUrl,
+                                )
+                            }
+                            successfulTasksById[publishedFileId].orEmpty().forEach { groupedTask ->
+                                downloadTaskDao.updateUpdateCheckState(
+                                    taskId = groupedTask.taskId,
+                                    lastUpdateCheckAt = now,
+                                    hasUpdateAvailable = hasUpdateAvailable,
+                                    updateCheckError = null,
+                                )
+                            }
+                        }
+                    }
+                    .onFailure { error ->
+                        AppLog.w(
+                            LOG_TAG,
+                            "checkDownloadedItemsForUpdates failed for batch size=${batchIds.size}",
+                            error,
+                        )
+                        failedCount += batchIds.size
+                        batchIds.forEach { publishedFileId ->
+                            successfulTasksById[publishedFileId].orEmpty().forEach { groupedTask ->
+                                downloadTaskDao.updateUpdateCheckState(
+                                    taskId = groupedTask.taskId,
+                                    lastUpdateCheckAt = now,
+                                    hasUpdateAvailable = false,
+                                    updateCheckError = error.message ?: "公开更新检查失败",
+                                )
+                            }
+                        }
+                    }
+            }
+
+            DownloadedItemsUpdateCheckResult(
+                summary = DownloadedItemsUpdateCheckSummary(
+                    requestedCount = requestedIds.size,
+                    checkedCount = checkedCount,
+                    updateAvailableCount = updateAvailableCount,
+                    failedCount = failedCount,
+                ),
+                updateCandidates = updateCandidates.values.toList(),
+            )
+        }
+    }
+
+    override suspend fun simulateUpdateAvailableForDownloadedItem(): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val successfulTasks = downloadTaskDao.getSuccessfulTasks()
+                .filter { it.publishedFileId > 0L }
+            require(successfulTasks.isNotEmpty()) { "当前没有可模拟更新的已完成任务" }
+
+            successfulTasks.forEach { task ->
+                val remoteItem = steamRepository.resolveWorkshopItems(listOf(task.publishedFileId))
+                    .getOrNull()
+                    ?.firstOrNull { it.publishedFileId == task.publishedFileId }
+                    ?: return@forEach
+
+                val simulatedBaseline = when {
+                    remoteItem.timeUpdated > 1L -> remoteItem.timeUpdated - 1L
+                    task.remoteUpdatedAt != null && task.remoteUpdatedAt > 1L -> task.remoteUpdatedAt - 1L
+                    else -> 0L
+                }
+                downloadTaskDao.primeUpdateCheckBaseline(
+                    publishedFileId = task.publishedFileId,
+                    remoteUpdatedAt = simulatedBaseline,
+                )
+                return@runCatching task.title
+            }
+
+            error("当前没有可通过公开工坊读取的已完成任务")
+        }
     }
 
     override suspend fun rebindRetryableTasksToCurrentSession() = withContext(Dispatchers.IO) {
@@ -520,6 +673,8 @@ class DownloadsRepositoryImpl @Inject constructor(
                         taskId = task.taskId,
                         status = cancelledStatus,
                         savedFileUri = latest.savedFileUri,
+                        savedRelativePath = latest.savedRelativePath,
+                        postProcessSummary = latest.postProcessSummary,
                         errorMessage = latest.errorMessage ?: if (cancelledStatus == DownloadStatus.Paused) "已暂停" else "已取消",
                         progressPercent = latest.progressPercent,
                         bytesDownloaded = latest.bytesDownloaded,
@@ -543,6 +698,8 @@ class DownloadsRepositoryImpl @Inject constructor(
                 taskId = existing.taskId,
                 status = DownloadStatus.Cancelled,
                 savedFileUri = existing.savedFileUri,
+                savedRelativePath = existing.savedRelativePath,
+                postProcessSummary = existing.postProcessSummary,
                 errorMessage = "已被新的下载请求替换",
                 progressPercent = existing.progressPercent,
                 bytesDownloaded = existing.bytesDownloaded,
@@ -572,6 +729,8 @@ class DownloadsRepositoryImpl @Inject constructor(
             taskId = task.taskId,
             status = DownloadStatus.Failed,
             savedFileUri = task.savedFileUri,
+            savedRelativePath = task.savedRelativePath,
+            postProcessSummary = task.postProcessSummary,
             errorMessage = message,
             progressPercent = task.progressPercent,
             bytesDownloaded = task.bytesDownloaded,
@@ -632,15 +791,19 @@ class DownloadsRepositoryImpl @Inject constructor(
                     runtimeTransportLabel = null,
                     runtimeEndpointLabel = null,
                     runtimeSourceAddress = null,
-                    runtimeAttemptCount = 0,
-                    runtimeChunkConcurrency = 0,
-                    runtimeLastFailure = null,
-                    status = DownloadStatus.Unavailable,
-                    pauseRequested = false,
-                    errorMessage = "该条目当前不可下载",
-                    updatedAt = System.currentTimeMillis(),
-                ),
-            )
+                runtimeAttemptCount = 0,
+                runtimeChunkConcurrency = 0,
+                runtimeLastFailure = null,
+                status = DownloadStatus.Unavailable,
+                pauseRequested = false,
+                errorMessage = "该条目当前不可下载",
+                remoteUpdatedAt = latestItem.timeUpdated.takeIf { it > 0L } ?: existing.remoteUpdatedAt,
+                lastUpdateCheckAt = existing.lastUpdateCheckAt,
+                hasUpdateAvailable = false,
+                updateCheckError = null,
+                updatedAt = System.currentTimeMillis(),
+            ),
+        )
             error("该条目当前不可下载")
         }
 
@@ -676,6 +839,10 @@ class DownloadsRepositoryImpl @Inject constructor(
                 status = DownloadStatus.Queued,
                 pauseRequested = false,
                 errorMessage = null,
+                remoteUpdatedAt = latestItem.timeUpdated.takeIf { it > 0L } ?: existing.remoteUpdatedAt,
+                lastUpdateCheckAt = existing.lastUpdateCheckAt,
+                hasUpdateAvailable = false,
+                updateCheckError = null,
                 updatedAt = System.currentTimeMillis(),
             ),
         )
