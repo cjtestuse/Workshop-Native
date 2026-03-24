@@ -137,14 +137,13 @@ private class TerrariaArchivePostProcessor : WorkshopDownloadPostProcessor {
         archiveFile: File,
     ) {
         archiveFile.parentFile?.mkdirs()
-        val baseParent = sourceRoot.parentFile ?: sourceRoot
         ZipOutputStream(
             BufferedOutputStream(FileOutputStream(archiveFile)),
         ).use { zipOutput ->
             zipOutput.setLevel(Deflater.DEFAULT_COMPRESSION)
             sourceRoot.walkTopDown().forEach { entry ->
                 currentCoroutineContext().ensureActive()
-                val relativePath = baseParent.toPath().relativize(entry.toPath()).toString()
+                val relativePath = sourceRoot.toPath().relativize(entry.toPath()).toString()
                     .replace(File.separatorChar, '/')
                     .trim('/')
                 if (relativePath.isBlank()) return@forEach
