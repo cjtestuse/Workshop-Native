@@ -154,18 +154,30 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.delay
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import okhttp3.ConnectionPool
+import okhttp3.CookieJar
 import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -227,6 +239,9 @@ class SteamSessionManager @Inject constructor(
         private const val STEAM_STORE_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
         private const val STEAM_STORE_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
         private const val STEAM_PUBLISHED_FILE_DETAILS_URL = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+        private const val WORKSHOP_PUBLIC_DETAILS_BATCH_SIZE = 50
+        private const val WORKSHOP_PUBLIC_DETAILS_RETRY_ATTEMPTS = 2
+        private const val GENERIC_WEB_USER_AGENT = "Mozilla/5.0"
         private const val WORKSHOP_USER_FILES_TYPE_SUBSCRIPTIONS = "mysubscriptions"
         private const val LOCAL_ROOT_REF_PREFIX = "local:"
         private const val TREE_ROOT_REF_PREFIX = "tree:"
@@ -288,6 +303,36 @@ class SteamSessionManager @Inject constructor(
         private var lastSuccessfulCdnHost: String? = null
         @Volatile
         private var lastSuccessfulCdnTransportDirect: Boolean? = null
+
+        internal fun isSupportedPublicWorkshopFileType(fileType: Int): Boolean {
+            return fileType in setOf(
+                0, // community item
+                2, // collection
+                3, // art
+                5, // screenshot
+                10, // integrated guide
+                11, // merch
+                12, // controller binding
+            )
+        }
+
+        internal fun clampWorkshopSubscriptions(subscriptions: Long?): Int {
+            return subscriptions
+                ?.coerceAtLeast(0L)
+                ?.coerceAtMost(Int.MAX_VALUE.toLong())
+                ?.toInt()
+                ?: 0
+        }
+    }
+
+    private val anonymousOkHttpClient: OkHttpClient by lazy(LazyThreadSafetyMode.NONE) {
+        okHttpClient.newBuilder().apply {
+            // Public workshop requests must stay isolated from any future auth/cache interceptors.
+            cookieJar(CookieJar.NO_COOKIES)
+            cache(null)
+            interceptors().clear()
+            networkInterceptors().clear()
+        }.build()
     }
 
     private data class ConnectionProfile(
@@ -1199,9 +1244,10 @@ class SteamSessionManager @Inject constructor(
             .build()
         val request = Request.Builder()
             .url(url)
+            .header("User-Agent", GENERIC_WEB_USER_AGENT)
             .get()
             .build()
-        val payload = okHttpClient.newCall(request).execute().use { response ->
+        val payload = anonymousOkHttpClient.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "Steam 商店信息请求失败：HTTP ${response.code}" }
             response.body?.string().orEmpty()
         }
@@ -1243,11 +1289,11 @@ class SteamSessionManager @Inject constructor(
                     .addQueryParameter("count", WORKSHOP_EXPLORE_PAGE_SIZE.toString())
                     .build(),
             )
-            .header("User-Agent", "Mozilla/5.0")
+            .header("User-Agent", GENERIC_WEB_USER_AGENT)
             .header("X-Requested-With", "XMLHttpRequest")
             .get()
             .build()
-        val payload = okHttpClient.newCall(request).execute().use { response ->
+        val payload = anonymousOkHttpClient.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "读取公开工坊游戏失败：HTTP ${response.code}" }
             response.body?.string().orEmpty()
         }
@@ -1304,10 +1350,10 @@ class SteamSessionManager @Inject constructor(
                     .addQueryParameter("cc", "CN")
                     .build(),
             )
-            .header("User-Agent", "Mozilla/5.0")
+            .header("User-Agent", GENERIC_WEB_USER_AGENT)
             .get()
             .build()
-        val payload = okHttpClient.newCall(request).execute().use { response ->
+        val payload = anonymousOkHttpClient.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "搜索 Steam 游戏失败：HTTP ${response.code}" }
             response.body?.string().orEmpty()
         }
@@ -1354,10 +1400,11 @@ class SteamSessionManager @Inject constructor(
         val url = buildWorkshopBrowseUrl(appId, query)
         val request = Request.Builder()
             .url(url)
+            .header("User-Agent", GENERIC_WEB_USER_AGENT)
             .get()
             .build()
         val html = runCatching {
-            okHttpClient.newCall(request).execute().use { response ->
+            anonymousOkHttpClient.newCall(request).execute().use { response ->
                 check(response.isSuccessful) { "Steam 创意工坊页面请求失败：HTTP ${response.code}" }
                 if (isWorkshopUnavailableRedirect(response.request.url)) {
                     error("该游戏当前没有开放 Steam 创意工坊")
@@ -2192,10 +2239,44 @@ class SteamSessionManager @Inject constructor(
             .distinct()
         if (normalizedIds.isEmpty()) return@withContext emptyList()
 
+        val mergedItems = mutableListOf<WorkshopItem>()
+        normalizedIds.chunked(WORKSHOP_PUBLIC_DETAILS_BATCH_SIZE).forEach { batchIds ->
+            var lastError: Throwable? = null
+            var batchLoaded = false
+            repeat(WORKSHOP_PUBLIC_DETAILS_RETRY_ATTEMPTS) { attempt ->
+                if (batchLoaded) return@repeat
+                val result = runCatching {
+                    requestPublishedFileDetailsPublicBatch(batchIds)
+                }
+                if (result.isSuccess) {
+                    mergedItems += result.getOrThrow()
+                    batchLoaded = true
+                    return@repeat
+                }
+                lastError = result.exceptionOrNull()
+                Log.w(
+                    LOG_TAG,
+                    "loadPublishedFileDetailsPublic failed attempt=${attempt + 1}/$WORKSHOP_PUBLIC_DETAILS_RETRY_ATTEMPTS batchSize=${batchIds.size}",
+                    lastError,
+                )
+                if (attempt < WORKSHOP_PUBLIC_DETAILS_RETRY_ATTEMPTS - 1) {
+                    delay(400L * (attempt + 1))
+                }
+            }
+            if (!batchLoaded) {
+                throw (lastError ?: IllegalStateException("Steam 创意工坊详情请求失败"))
+            }
+        }
+        mergedItems
+    }
+
+    private fun requestPublishedFileDetailsPublicBatch(
+        publishedFileIds: List<Long>,
+    ): List<WorkshopItem> {
         val formBody = okhttp3.FormBody.Builder()
-            .add("itemcount", normalizedIds.size.toString())
+            .add("itemcount", publishedFileIds.size.toString())
             .apply {
-                normalizedIds.forEachIndexed { index, publishedFileId ->
+                publishedFileIds.forEachIndexed { index, publishedFileId ->
                     add("publishedfileids[$index]", publishedFileId.toString())
                 }
                 add("includechildren", "true")
@@ -2206,15 +2287,19 @@ class SteamSessionManager @Inject constructor(
             .build()
         val request = Request.Builder()
             .url(STEAM_PUBLISHED_FILE_DETAILS_URL)
+            .header("Accept", "application/json")
+            .header("Origin", "https://steamcommunity.com")
+            .header("Referer", STEAM_WORKSHOP_HOME_URL)
+            .header("User-Agent", GENERIC_WEB_USER_AGENT)
             .post(formBody)
             .build()
 
-        val payload = okHttpClient.newCall(request).execute().use { response ->
+        val payload = anonymousOkHttpClient.newCall(request).execute().use { response ->
             check(response.isSuccessful) { "Steam 创意工坊详情请求失败：HTTP ${response.code}" }
             response.body?.string().orEmpty()
         }
         val envelope = json.decodeFromString<PublicPublishedFileDetailsEnvelope>(payload)
-        envelope.response.publishedFileDetails
+        return envelope.response.publishedFileDetails
             .mapNotNull(::mapPublicPublishedFileDetails)
     }
 
@@ -5297,15 +5382,21 @@ class SteamSessionManager @Inject constructor(
         val updatedDateRange = query.updatedDateRange.normalized()
         addQueryParameter("appid", appId.toString())
         addQueryParameter("l", "schinese")
-        addQueryParameter("actualsort", query.sortKey)
-        addQueryParameter("browsesort", query.sortKey)
         addQueryParameter("p", query.page.toString())
         addQueryParameter("numperpage", query.pageSize.toString())
         if (query.sectionKey.isNotBlank()) {
             addQueryParameter("section", query.sectionKey)
         }
-        if (query.sortKey == WorkshopBrowseQuery.SORT_TREND) {
-            addQueryParameter("days", query.periodDays.toString())
+        when (query.sortKey) {
+            WorkshopBrowseQuery.SORT_TREND -> {
+                addQueryParameter("actualsort", query.sortKey)
+                addQueryParameter("browsesort", query.sortKey)
+                addQueryParameter("days", query.periodDays.toString())
+            }
+
+            else -> {
+                addQueryParameter("browsesort", query.sortKey)
+            }
         }
         if (query.searchText.isNotBlank()) {
             addQueryParameter("searchtext", query.searchText)
@@ -5371,7 +5462,111 @@ class SteamSessionManager @Inject constructor(
         }
     }
 
-    private fun parseWorkshopBrowsePage(
+    private suspend fun parseWorkshopBrowsePage(
+        appId: Int,
+        query: WorkshopBrowseQuery,
+        html: String,
+    ): WorkshopBrowsePage {
+        val skeleton = PublicWorkshopBrowseParser.parse(
+            appId = appId,
+            query = query,
+            html = html,
+            baseUrl = buildWorkshopBrowseUrl(appId, query).toString(),
+        )
+        val detailedItemsById = runCatching {
+            loadPublishedFileDetailsPublic(
+                skeleton.items.map(PublicWorkshopBrowseItemSkeleton::publishedFileId),
+            ).associateBy(WorkshopItem::publishedFileId)
+        }.onFailure { throwable ->
+            Log.w(
+                LOG_TAG,
+                "parseWorkshopBrowsePage public detail enrichment failed appId=$appId page=${query.page}",
+                throwable,
+            )
+        }.getOrDefault(emptyMap())
+        val mergedItems = skeleton.items.map { itemSkeleton ->
+            mergePublicWorkshopBrowseItem(
+                itemSkeleton = itemSkeleton,
+                detailedItem = detailedItemsById[itemSkeleton.publishedFileId],
+                appId = appId,
+            )
+        }
+
+        val totalCount = skeleton.totalCount
+            ?: inferWorkshopTotalCount(
+                currentPage = query.page,
+                maxPage = skeleton.maxPage,
+                currentPageItemCount = mergedItems.size,
+                pageSize = query.pageSize,
+            )
+
+        val effectiveItems = if (skeleton.isExplicitlyEmpty && totalCount == 0) {
+            emptyList()
+        } else {
+            mergedItems
+        }
+
+        if (effectiveItems.isNotEmpty() || skeleton.isExplicitlyEmpty) {
+            return WorkshopBrowsePage(
+                items = effectiveItems,
+                totalCount = totalCount,
+                page = query.page,
+                hasMore = query.page < skeleton.maxPage || query.page * query.pageSize < totalCount,
+                sectionOptions = skeleton.sectionOptions,
+                sortOptions = skeleton.sortOptions,
+                periodOptions = skeleton.periodOptions,
+                tagGroups = skeleton.tagGroups,
+                supportsIncompatibleFilter = skeleton.supportsIncompatibleFilter,
+            )
+        }
+
+        Log.w(LOG_TAG, "parseWorkshopBrowsePage fallback to legacy parser appId=$appId page=${query.page}")
+        return parseWorkshopBrowsePageLegacy(appId = appId, query = query, html = html)
+    }
+
+    private fun mergePublicWorkshopBrowseItem(
+        itemSkeleton: PublicWorkshopBrowseItemSkeleton,
+        detailedItem: WorkshopItem?,
+        appId: Int,
+    ): WorkshopItem {
+        val detailUrl = "https://steamcommunity.com/sharedfiles/filedetails/?id=${itemSkeleton.publishedFileId}"
+        if (detailedItem != null) {
+            return detailedItem.copy(
+                appId = detailedItem.appId.takeIf { it > 0 } ?: appId,
+                title = detailedItem.title.ifBlank {
+                    itemSkeleton.title.ifBlank { "Workshop #${itemSkeleton.publishedFileId}" }
+                },
+                previewUrl = detailedItem.previewUrl ?: itemSkeleton.previewUrl,
+                authorName = detailedItem.authorName.ifBlank { itemSkeleton.authorName },
+                detailUrl = detailUrl,
+            )
+        }
+
+        return WorkshopItem(
+            publishedFileId = itemSkeleton.publishedFileId,
+            appId = appId,
+            title = itemSkeleton.title.ifBlank { "Workshop #${itemSkeleton.publishedFileId}" },
+            shortDescription = "",
+            description = "",
+            previewUrl = itemSkeleton.previewUrl,
+            authorName = itemSkeleton.authorName,
+            authorProfileUrl = null,
+            detailUrl = detailUrl,
+            fileUrl = null,
+            fileName = null,
+            fileSize = 0L,
+            timeUpdated = 0L,
+            subscriptions = 0,
+            creatorSteamId = 0L,
+            contentManifestId = 0L,
+            childPublishedFileIds = emptyList(),
+            tags = emptyList(),
+            isSubscribed = false,
+            isDownloadInfoResolved = false,
+        )
+    }
+
+    private fun parseWorkshopBrowsePageLegacy(
         appId: Int,
         query: WorkshopBrowseQuery,
         html: String,
@@ -5778,11 +5973,11 @@ class SteamSessionManager @Inject constructor(
             .build()
         val request = Request.Builder()
             .url(detailUrl)
-            .header("User-Agent", "Mozilla/5.0")
+            .header("User-Agent", GENERIC_WEB_USER_AGENT)
             .get()
             .build()
         runCatching {
-            val html = okHttpClient.newCall(request).execute().use { response ->
+            val html = anonymousOkHttpClient.newCall(request).execute().use { response ->
                 check(response.isSuccessful) {
                     "Steam workshop detail page failed: HTTP ${response.code}"
                 }
@@ -5872,7 +6067,7 @@ class SteamSessionManager @Inject constructor(
     ): WorkshopItem? {
         if (details.result != 1) return null
         val fileType = details.fileType ?: 0
-        if (fileType == 2 || fileType !in setOf(0, 3, 5, 10, 11, 12)) return null
+        if (!isSupportedPublicWorkshopFileType(fileType)) return null
 
         return WorkshopItem(
             publishedFileId = details.publishedFileId,
@@ -5888,7 +6083,7 @@ class SteamSessionManager @Inject constructor(
             fileName = details.filename?.takeIf(String::isNotBlank),
             fileSize = details.fileSize ?: 0L,
             timeUpdated = details.timeUpdated ?: 0L,
-            subscriptions = (details.subscriptions ?: 0L).toInt(),
+            subscriptions = clampWorkshopSubscriptions(details.subscriptions),
             creatorSteamId = details.creator ?: 0L,
             contentManifestId = details.hcontentFile ?: 0L,
             childPublishedFileIds = details.children.orEmpty()
@@ -6032,12 +6227,15 @@ class SteamSessionManager @Inject constructor(
         @SerialName("file_url")
         val fileUrl: String? = null,
         @SerialName("file_size")
+        @Serializable(with = LenientNullableLongSerializer::class)
         val fileSize: Long? = null,
         @SerialName("file_type")
         val fileType: Int? = null,
         @SerialName("hcontent_file")
+        @Serializable(with = LenientNullableLongSerializer::class)
         val hcontentFile: Long? = null,
         @SerialName("consumer_app_id")
+        @Serializable(with = LenientNullableLongSerializer::class)
         val consumerAppId: Long? = null,
         @SerialName("preview_url")
         val previewUrl: String? = null,
@@ -6046,8 +6244,11 @@ class SteamSessionManager @Inject constructor(
         @SerialName("file_description")
         val fileDescription: String? = null,
         @SerialName("time_updated")
+        @Serializable(with = LenientNullableLongSerializer::class)
         val timeUpdated: Long? = null,
+        @Serializable(with = LenientNullableLongSerializer::class)
         val subscriptions: Long? = null,
+        @Serializable(with = LenientNullableLongSerializer::class)
         val creator: Long? = null,
         val tags: List<PublicWorkshopTag>? = null,
         val children: List<PublicWorkshopChild>? = null,
@@ -6065,5 +6266,36 @@ class SteamSessionManager @Inject constructor(
         @SerialName("publishedfileid")
         val publishedFileId: Long? = null,
     )
+
+    @OptIn(ExperimentalSerializationApi::class)
+    internal object LenientNullableLongSerializer : KSerializer<Long?> {
+        override val descriptor: SerialDescriptor =
+            PrimitiveSerialDescriptor("LenientNullableLongSerializer", PrimitiveKind.STRING)
+
+        override fun deserialize(decoder: Decoder): Long? {
+            val jsonDecoder = decoder as? JsonDecoder ?: return runCatching { decoder.decodeLong() }.getOrNull()
+            return jsonElementToLongOrNull(jsonDecoder.decodeJsonElement())
+        }
+
+        override fun serialize(encoder: Encoder, value: Long?) {
+            if (value == null) {
+                encoder.encodeNull()
+            } else {
+                encoder.encodeLong(value)
+            }
+        }
+
+        internal fun jsonElementToLongOrNull(element: JsonElement?): Long? {
+            val primitive = when (element) {
+                null, JsonNull -> return null
+                is JsonPrimitive -> element
+                else -> return null
+            }
+            return primitive.contentOrNull
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?.toLongOrNull()
+        }
+    }
 
 }

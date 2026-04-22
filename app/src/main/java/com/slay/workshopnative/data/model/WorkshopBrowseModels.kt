@@ -43,6 +43,10 @@ data class WorkshopBrowseQuery(
         const val SECTION_ITEMS = "readytouseitems"
         const val SECTION_MY_SUBSCRIPTIONS = "mysubscriptions"
         const val SORT_TREND = "trend"
+        const val SORT_TOP_RATED = "toprated"
+        const val SORT_MOST_RECENT = "mostrecent"
+        const val SORT_LAST_UPDATED = "lastupdated"
+        const val SORT_TOTAL_UNIQUE_SUBSCRIBERS = "totaluniquesubscribers"
 
         fun normalizePageSize(pageSize: Int): Int {
             return if (pageSize in PAGE_SIZE_OPTIONS) pageSize else DEFAULT_PAGE_SIZE

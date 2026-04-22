@@ -140,9 +140,8 @@ fun WorkshopScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     var showFilters by rememberSaveable { mutableStateOf(false) }
     var showSourcePicker by rememberSaveable { mutableStateOf(false) }
-    var showSectionPicker by rememberSaveable { mutableStateOf(false) }
-    var showSortPicker by rememberSaveable { mutableStateOf(false) }
-    var showPeriodPicker by rememberSaveable { mutableStateOf(false) }
+    var showBrowseSectionPicker by rememberSaveable { mutableStateOf(false) }
+    var showBrowseQuickFilterPicker by rememberSaveable { mutableStateOf(false) }
     var searchText by rememberSaveable(appId, launchMode.name) { mutableStateOf("") }
     var isSearchFieldFocused by rememberSaveable(appId, launchMode.name) { mutableStateOf(false) }
     var suppressExitBackAfterSearch by rememberSaveable(appId, launchMode.name) { mutableStateOf(false) }
@@ -166,9 +165,8 @@ fun WorkshopScreen(
     LaunchedEffect(state.launchMode) {
         if (!isBrowseMode) {
             showFilters = false
-            showSectionPicker = false
-            showSortPicker = false
-            showPeriodPicker = false
+            showBrowseSectionPicker = false
+            showBrowseQuickFilterPicker = false
         }
     }
 
@@ -235,9 +233,8 @@ fun WorkshopScreen(
                 onRefresh = viewModel::refresh,
                 onOpenSourcePicker = { showSourcePicker = true },
                 onOpenFilters = { showFilters = true },
-                onOpenSectionPicker = { showSectionPicker = true },
-                onOpenSortPicker = { showSortPicker = true },
-                onOpenPeriodPicker = { showPeriodPicker = true },
+                onOpenBrowseSectionPicker = { showBrowseSectionPicker = true },
+                onOpenBrowseQuickFilterPicker = { showBrowseQuickFilterPicker = true },
                 canOpenAccountQuery = state.canOpenAccountQuery,
                 onOpenAccountQuery = viewModel::openAccountQueryMode,
                 canOpenSubscriptions = state.canOpenSubscriptions,
@@ -248,7 +245,6 @@ fun WorkshopScreen(
                 sectionOptions = state.sectionOptions,
                 sortOptions = state.sortOptions,
                 periodOptions = state.periodOptions,
-                activeTagCount = state.query.requiredTags.size + state.query.excludedTags.size,
                 searchText = searchText,
                 onSearchTextChange = { searchText = it },
                 onSearchFocusChanged = { isSearchFieldFocused = it },
@@ -462,19 +458,19 @@ fun WorkshopScreen(
         )
     }
 
-    val sectionPickerOptions = remember(state.sectionOptions, state.query.sectionKey) {
+    val browseSectionPickerOptions = remember(state.sectionOptions, state.query.sectionKey) {
         state.sectionOptions
             .takeIf(List<WorkshopBrowseSectionOption>::isNotEmpty)
             ?.map { it.key to it.label }
             ?: fallbackSectionOptions(state.query.sectionKey)
     }
-    val sortPickerOptions = remember(state.sortOptions, state.query.sortKey) {
+    val browseSortPickerOptions = remember(state.sortOptions, state.query.sortKey) {
         state.sortOptions
             .takeIf(List<WorkshopBrowseSortOption>::isNotEmpty)
             ?.map { it.key to it.label }
             ?: fallbackSortOptions(state.query.sortKey)
     }
-    val periodPickerOptions = remember(state.periodOptions, state.query.periodDays) {
+    val browsePeriodPickerOptions = remember(state.periodOptions, state.query.periodDays) {
         state.periodOptions
             .takeIf(List<WorkshopBrowsePeriodOption>::isNotEmpty)
             ?.map { it.days.toString() to it.label }
@@ -508,38 +504,18 @@ fun WorkshopScreen(
         )
     }
 
-    if (isBrowseMode && showSectionPicker) {
+    if (isBrowseMode && showBrowseSectionPicker) {
         QuickChoiceSheet(
-            title = "内容区",
-            subtitle = "切换当前浏览的 Workshop 内容分类",
-            options = sectionPickerOptions,
+            title = "浏览",
+            subtitle = "切换当前公开工坊浏览范围。",
+            options = browseSectionPickerOptions,
             selectedKey = state.query.sectionKey,
-            onDismiss = { showSectionPicker = false },
+            onDismiss = { showBrowseSectionPicker = false },
             onSelect = { selectedKey ->
-                showSectionPicker = false
-                viewModel.applyQuery(state.query.copy(sectionKey = selectedKey, page = 1))
-            },
-        )
-    }
-
-    if (isBrowseMode && showSortPicker) {
-        QuickChoiceSheet(
-            title = "排序",
-            subtitle = "选择列表结果的排列方式",
-            options = sortPickerOptions,
-            selectedKey = state.query.sortKey,
-            onDismiss = { showSortPicker = false },
-            onSelect = { selectedKey ->
-                showSortPicker = false
-                val nextPeriod = if (sortSupportsPeriod(selectedKey)) {
-                    state.query.periodDays
-                } else {
-                    WorkshopBrowseQuery().periodDays
-                }
+                showBrowseSectionPicker = false
                 viewModel.applyQuery(
                     state.query.copy(
-                        sortKey = selectedKey,
-                        periodDays = nextPeriod,
+                        sectionKey = selectedKey,
                         page = 1,
                     ),
                 )
@@ -547,21 +523,15 @@ fun WorkshopScreen(
         )
     }
 
-    if (isBrowseMode && showPeriodPicker) {
-        QuickChoiceSheet(
-            title = "时间范围",
-            subtitle = "只对支持趋势排序的方式生效",
-            options = periodPickerOptions,
-            selectedKey = state.query.periodDays.toString(),
-            onDismiss = { showPeriodPicker = false },
-            onSelect = { selectedKey ->
-                showPeriodPicker = false
-                viewModel.applyQuery(
-                    state.query.copy(
-                        periodDays = selectedKey.toIntOrNull() ?: state.query.periodDays,
-                        page = 1,
-                    ),
-                )
+    if (isBrowseMode && showBrowseQuickFilterPicker) {
+        SteamPublicBrowseQuickFilterSheet(
+            currentQuery = state.query,
+            sortOptions = browseSortPickerOptions,
+            periodOptions = browsePeriodPickerOptions,
+            onDismiss = { showBrowseQuickFilterPicker = false },
+            onApply = { nextQuery ->
+                showBrowseQuickFilterPicker = false
+                viewModel.applyQuery(nextQuery)
             },
         )
     }
@@ -684,15 +654,13 @@ private fun WorkshopTopBarModern(
     launchMode: WorkshopLaunchMode,
     isRefreshing: Boolean,
     query: WorkshopBrowseQuery,
-    activeTagCount: Int,
     searchText: String,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onOpenSourcePicker: () -> Unit,
     onOpenFilters: () -> Unit,
-    onOpenSectionPicker: () -> Unit,
-    onOpenSortPicker: () -> Unit,
-    onOpenPeriodPicker: () -> Unit,
+    onOpenBrowseSectionPicker: () -> Unit,
+    onOpenBrowseQuickFilterPicker: () -> Unit,
     canOpenAccountQuery: Boolean,
     onOpenAccountQuery: () -> Unit,
     canOpenSubscriptions: Boolean,
@@ -708,7 +676,6 @@ private fun WorkshopTopBarModern(
 ) {
     val darkTheme = LocalWorkshopDarkTheme.current
     val advancedFilterCount = query.activeAdvancedFilterCount()
-    val supportsPeriod = query.sortKey == WorkshopBrowseQuery.SORT_TREND
     val isBrowseMode = launchMode == WorkshopLaunchMode.Browse
     val isAccountQueryMode = launchMode == WorkshopLaunchMode.AccountQuery
     val isSubscriptionMode = launchMode == WorkshopLaunchMode.Subscriptions
@@ -719,8 +686,11 @@ private fun WorkshopTopBarModern(
         WorkshopLaunchMode.Subscriptions -> "我的订阅"
     }
     val currentSectionLabel = resolveSectionLabel(query.sectionKey, sectionOptions)
-    val currentSortLabel = resolveSortLabel(query.sortKey, sortOptions)
-    val currentPeriodLabel = resolvePeriodLabel(query.periodDays, periodOptions)
+    val publicQuickFilterLabel = steamPublicQuickFilterLabel(
+        query = query,
+        sortOptions = sortOptions,
+        periodOptions = periodOptions,
+    )
     val headerMeta = buildList {
         if (!isInitialSync) {
             add(
@@ -732,13 +702,8 @@ private fun WorkshopTopBarModern(
             )
         }
         if (isBrowseMode) {
-            if (query.sectionKey != WorkshopBrowseQuery.SECTION_ITEMS) {
-                add(currentSectionLabel)
-            }
-            add(currentSortLabel)
-            if (supportsPeriod) {
-                add(currentPeriodLabel)
-            }
+            add(currentSectionLabel)
+            add(publicQuickFilterLabel)
         }
     }.joinToString(" · ")
     val statusMessage = if (isRefreshing || isInitialSync) {
@@ -965,19 +930,15 @@ private fun WorkshopTopBarModern(
                     }
                     if (isBrowseMode) {
                         QuickFilterChip(
-                            label = currentSectionLabel,
-                            onClick = onOpenSectionPicker,
+                            label = "浏览",
+                            onClick = onOpenBrowseSectionPicker,
                         )
+                    }
+                    if (isBrowseMode) {
                         QuickFilterChip(
-                            label = currentSortLabel,
-                            onClick = onOpenSortPicker,
+                            label = publicQuickFilterLabel,
+                            onClick = onOpenBrowseQuickFilterPicker,
                         )
-                        if (supportsPeriod) {
-                            QuickFilterChip(
-                                label = currentPeriodLabel,
-                                onClick = onOpenPeriodPicker,
-                            )
-                        }
                     }
                     if (canOpenSubscriptions) {
                         QuickFilterChip(
@@ -1204,6 +1165,99 @@ private fun QuickChoiceSheet(
                             selected = selectedKey == key,
                             onClick = { onSelect(key) },
                         )
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun SteamPublicBrowseQuickFilterSheet(
+    currentQuery: WorkshopBrowseQuery,
+    sortOptions: List<Pair<String, String>>,
+    periodOptions: List<Pair<String, String>>,
+    onDismiss: () -> Unit,
+    onApply: (WorkshopBrowseQuery) -> Unit,
+) {
+    WorkshopNativeModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "公开工坊视图",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "与 Steam 当前公开页一致，最热门时才显示时间范围；All Time 会切到最受好评（发布至今）。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Surface(
+                color = workshopAdaptiveSurfaceColor(light = Color.White.copy(alpha = 0.84f)),
+                shape = RoundedCornerShape(24.dp),
+                border = BorderStroke(1.dp, workshopAdaptiveBorderColor(light = Color.White.copy(alpha = 0.4f))),
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = "排序",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    sortOptions.forEach { (key, label) ->
+                        ChoiceRow(
+                            label = label,
+                            selected = currentQuery.sortKey == key,
+                            onClick = {
+                                onApply(
+                                    currentQuery.copy(
+                                        sortKey = key,
+                                        page = 1,
+                                    ),
+                                )
+                            },
+                        )
+                    }
+
+                    if (sortSupportsPeriod(currentQuery.sortKey)) {
+                        Text(
+                            text = "时间范围",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        periodOptions.forEach { (key, label) ->
+                            ChoiceRow(
+                                label = label,
+                                selected = key == currentQuery.periodDays.toString(),
+                                onClick = {
+                                    val selectedDays = key.toIntOrNull()
+                                    val nextQuery = if (selectedDays == -1) {
+                                        currentQuery.copy(
+                                            sortKey = WorkshopBrowseQuery.SORT_TOP_RATED,
+                                            page = 1,
+                                        )
+                                    } else {
+                                        currentQuery.copy(
+                                            sortKey = WorkshopBrowseQuery.SORT_TREND,
+                                            periodDays = selectedDays ?: currentQuery.periodDays,
+                                            page = 1,
+                                        )
+                                    }
+                                    onApply(nextQuery)
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -2693,26 +2747,49 @@ private fun sectionLabel(sectionKey: String): String {
     }
 }
 
-private fun sortLabel(sortKey: String): String {
+private fun steamPublicQuickFilterLabel(
+    query: WorkshopBrowseQuery,
+    sortOptions: List<WorkshopBrowseSortOption>,
+    periodOptions: List<WorkshopBrowsePeriodOption>,
+): String {
+    val currentSortLabel = resolveSortLabel(query.sortKey, sortOptions)
+    return when (query.sortKey) {
+        WorkshopBrowseQuery.SORT_TREND -> "$currentSortLabel（${resolvePeriodLabel(query.periodDays, periodOptions)}）"
+        else -> currentSortLabel
+    }
+}
+
+private fun steamPublicSortLabel(sortKey: String): String {
     return when (sortKey) {
-        "trend" -> "最热门"
-        "mostrecent" -> "最新"
-        "lastupdated" -> "最后更新"
-        "totaluniquesubscribers" -> "最多订阅"
+        WorkshopBrowseQuery.SORT_TREND -> "最热门"
+        WorkshopBrowseQuery.SORT_TOP_RATED -> "最受好评（发布至今）"
+        WorkshopBrowseQuery.SORT_MOST_RECENT -> "最近发行"
+        WorkshopBrowseQuery.SORT_LAST_UPDATED -> "最新更新"
+        WorkshopBrowseQuery.SORT_TOTAL_UNIQUE_SUBSCRIBERS -> "不重复订阅者总计"
         else -> sortKey
     }
 }
 
-private fun periodLabel(days: Int): String {
+private fun steamPublicPeriodLabel(days: Int): String {
     return when (days) {
         1 -> "今天"
-        7 -> "一周"
+        7 -> "1 周"
         30 -> "30 天"
-        90 -> "三个月"
-        180 -> "半年"
-        365 -> "一年"
-        -1 -> "有史以来"
+        90 -> "3 个月"
+        180 -> "6 个月"
+        365 -> "1 年"
         else -> "${days} 天"
+    }
+}
+
+private fun sortLabel(sortKey: String): String {
+    return steamPublicSortLabel(sortKey)
+}
+
+private fun periodLabel(days: Int): String {
+    return when (days) {
+        -1 -> "All Time"
+        else -> steamPublicPeriodLabel(days)
     }
 }
 
@@ -2729,9 +2806,10 @@ private fun fallbackSectionOptions(currentKey: String): List<Pair<String, String
 private fun fallbackSortOptions(currentKey: String): List<Pair<String, String>> {
     val defaults = listOf(
         WorkshopBrowseQuery.SORT_TREND,
-        "mostrecent",
-        "lastupdated",
-        "totaluniquesubscribers",
+        WorkshopBrowseQuery.SORT_TOP_RATED,
+        WorkshopBrowseQuery.SORT_MOST_RECENT,
+        WorkshopBrowseQuery.SORT_LAST_UPDATED,
+        WorkshopBrowseQuery.SORT_TOTAL_UNIQUE_SUBSCRIBERS,
     )
     return buildList {
         defaults.forEach { key ->
@@ -2971,35 +3049,6 @@ private fun shouldShowPagination(
     pageSize: Int,
 ): Boolean {
     return currentPage > 1 || hasMore || totalCount > pageSize
-}
-
-private fun workshopSummaryText(
-    query: WorkshopBrowseQuery,
-    activeTagCount: Int,
-): String {
-    val parts = buildList {
-        add(sectionLabel(query.sectionKey))
-        add(sortLabel(query.sortKey))
-        if (query.sortKey == WorkshopBrowseQuery.SORT_TREND) {
-            add(periodLabel(query.periodDays))
-        }
-        if (query.searchText.isNotBlank()) {
-            add("搜索 ${query.searchText}")
-        }
-        if (activeTagCount > 0) {
-            add("标签 $activeTagCount")
-        }
-        if (query.showIncompatible) {
-            add("含不兼容")
-        }
-        if (query.createdDateRange.isActive) {
-            add(query.createdDateRange.summaryLabel("发布时间"))
-        }
-        if (query.updatedDateRange.isActive) {
-            add(query.updatedDateRange.summaryLabel("最后更新时间"))
-        }
-    }
-    return parts.joinToString(" · ")
 }
 
 private val workshopDateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy 年 M 月 d 日")
