@@ -34,9 +34,17 @@ import com.slay.workshopnative.core.storage.buildWorkshopExportPlan
 import com.slay.workshopnative.core.storage.uniqueMediaStoreRootName
 import com.slay.workshopnative.core.storage.uniqueMediaStoreRootNameWithTimestampFallback
 import com.slay.workshopnative.core.storage.workshopDownloadStagingRoot
+import com.slay.workshopnative.core.util.DownloadFailureException
+import com.slay.workshopnative.core.util.DownloadFailureReason
+import com.slay.workshopnative.core.util.DownloadFailureSource
+import com.slay.workshopnative.core.util.DownloadFailureStage
 import com.slay.workshopnative.core.util.buildAccountBindingHash
 import com.slay.workshopnative.core.util.DownloadPausedException
+import com.slay.workshopnative.core.util.isNoCdnRouteFailureLike
+import com.slay.workshopnative.core.util.isStorageFailureLike
 import com.slay.workshopnative.core.util.sanitizeFileName
+import com.slay.workshopnative.core.util.toDiagnosticsFields
+import com.slay.workshopnative.core.util.toDownloadFailureException
 import com.slay.workshopnative.core.util.toUserMessage
 import com.slay.workshopnative.data.local.DownloadAuthMode
 import com.slay.workshopnative.data.model.AuthChallenge
@@ -1643,26 +1651,53 @@ class SteamSessionManager @Inject constructor(
     }
 
     @WorkerThread
-    suspend fun resolveWorkshopItemForDownload(publishedFileId: Long): WorkshopItem = withContext(Dispatchers.IO) {
-        Log.d(LOG_TAG, "resolveWorkshopItemForDownload publishedFileId=$publishedFileId")
-        resolveWorkshopItemsForDownload(listOf(publishedFileId)).firstOrNull()
+    suspend fun resolveWorkshopItemForDownload(
+        publishedFileId: Long,
+        forceRefresh: Boolean = false,
+    ): WorkshopItem = withContext(Dispatchers.IO) {
+        Log.d(
+            LOG_TAG,
+            "resolveWorkshopItemForDownload publishedFileId=$publishedFileId forceRefresh=$forceRefresh",
+        )
+        resolveWorkshopItemsForDownload(
+            publishedFileIds = listOf(publishedFileId),
+            forceRefresh = forceRefresh,
+        ).firstOrNull()
             ?: error("未找到该创意工坊条目")
     }
 
     suspend fun resolveWorkshopItemsForDownload(
         publishedFileIds: Collection<Long>,
+        forceRefresh: Boolean = false,
     ): List<WorkshopItem> = withContext(Dispatchers.IO) {
         val normalizedIds = publishedFileIds
             .filter { it > 0L }
             .distinct()
         if (normalizedIds.isEmpty()) return@withContext emptyList()
 
-        Log.d(LOG_TAG, "resolveWorkshopItemsForDownload count=${normalizedIds.size}")
-        val cachedById = normalizedIds.associateWithNotNull { publishedFileId ->
-            getCachedWorkshopItem(downloadWorkshopItemCache, publishedFileId)
-                ?: getCachedWorkshopItem(workshopItemCache, publishedFileId)
+        Log.d(
+            LOG_TAG,
+            "resolveWorkshopItemsForDownload count=${normalizedIds.size} forceRefresh=$forceRefresh",
+        )
+        if (forceRefresh) {
+            normalizedIds.forEach { publishedFileId ->
+                downloadWorkshopItemCache.remove(publishedFileId)
+                workshopItemCache.remove(publishedFileId)
+            }
         }
-        val missingIds = normalizedIds.filter { it !in cachedById }
+        val cachedById = if (forceRefresh) {
+            emptyMap()
+        } else {
+            normalizedIds.associateWithNotNull { publishedFileId ->
+                getCachedWorkshopItem(downloadWorkshopItemCache, publishedFileId)
+                    ?: getCachedWorkshopItem(workshopItemCache, publishedFileId)
+            }
+        }
+        val missingIds = if (forceRefresh) {
+            normalizedIds
+        } else {
+            normalizedIds.filter { it !in cachedById }
+        }
         if (missingIds.isNotEmpty()) {
             resolveWorkshopItems(missingIds).forEach { item ->
                 downloadWorkshopItemCache[item.publishedFileId] = CachedValue(item)
@@ -1854,7 +1889,7 @@ class SteamSessionManager @Inject constructor(
         )
         val transportModes = prioritizedTransportModes(prefs.cdnTransportPreference)
         onStorageRootResolved(storageRoot.resumeRef)
-        val failures = mutableListOf<String>()
+        val failures = mutableListOf<Throwable>()
 
         if (anonymousFirst) {
             runCatching {
@@ -1891,14 +1926,15 @@ class SteamSessionManager @Inject constructor(
                     onRuntimeInfoChanged = onRuntimeInfoChanged,
                 )
             }.onSuccess {
-                return@withContext storageRoot.exportResultUri(
+                return@withContext exportWorkshopDownloadResult(
+                    storageRoot = storageRoot,
                     treeUri = targetTreeUri,
                     downloadFolderName = downloadFolderName,
                     onPhaseChanged = onPhaseChanged,
                 )
             }.onFailure { throwable ->
                 if (throwable.isPauseSignal()) throw throwable
-                failures += "匿名 Steam 内容下载失败：${throwable.message ?: "未知错误"}"
+                failures += throwable
             }
         }
 
@@ -1940,14 +1976,15 @@ class SteamSessionManager @Inject constructor(
                     onRuntimeInfoChanged = onRuntimeInfoChanged,
                 )
             }.onSuccess {
-                return@withContext storageRoot.exportResultUri(
+                return@withContext exportWorkshopDownloadResult(
+                    storageRoot = storageRoot,
                     treeUri = targetTreeUri,
                     downloadFolderName = downloadFolderName,
                     onPhaseChanged = onPhaseChanged,
                 )
             }.onFailure { throwable ->
                 if (throwable.isPauseSignal()) throw throwable
-                failures += "已登录 Steam 内容下载失败：${throwable.message ?: "未知错误"}"
+                failures += throwable
             }
         }
 
@@ -1986,24 +2023,42 @@ class SteamSessionManager @Inject constructor(
                     onRuntimeInfoChanged = onRuntimeInfoChanged,
                 )
             }.onSuccess {
-                return@withContext storageRoot.exportResultUri(
+                return@withContext exportWorkshopDownloadResult(
+                    storageRoot = storageRoot,
                     treeUri = targetTreeUri,
                     downloadFolderName = downloadFolderName,
                     onPhaseChanged = onPhaseChanged,
                 )
             }.onFailure { throwable ->
                 if (throwable.isPauseSignal()) throw throwable
-                failures += "匿名 Steam 内容回退失败：${throwable.message ?: "未知错误"}"
+                failures += throwable
             }
         }
 
         if (!prefs.isLoginFeatureEnabled && downloadAuthMode != DownloadAuthMode.Anonymous) {
-            error("已在设置中关闭登录功能，当前只允许匿名下载")
+            throw IllegalStateException("已在设置中关闭登录功能，当前只允许匿名下载").toDownloadFailureException(
+                source = DownloadFailureSource.SteamAuthenticated,
+                stage = DownloadFailureStage.AuthenticatedSessionRestore,
+                userMessage = "已在设置中关闭登录功能，当前只允许匿名下载",
+                reasonOverride = DownloadFailureReason.AccessDenied,
+                retryableOverride = false,
+            )
         }
         if (!prefs.isLoggedInDownloadEnabled && downloadAuthMode != DownloadAuthMode.Anonymous) {
-            error("已在设置中关闭“登录后下载”，当前只允许匿名下载")
+            throw IllegalStateException("已在设置中关闭“登录后下载”，当前只允许匿名下载").toDownloadFailureException(
+                source = DownloadFailureSource.SteamAuthenticated,
+                stage = DownloadFailureStage.AuthenticatedSessionRestore,
+                userMessage = "已在设置中关闭“登录后下载”，当前只允许匿名下载",
+                reasonOverride = DownloadFailureReason.AccessDenied,
+                retryableOverride = false,
+            )
         }
-        error(failures.distinct().joinToString("；").ifBlank { "Steam 内容下载失败" })
+        throw failures.lastOrNull()
+            ?: IllegalStateException("Steam 内容下载失败").toDownloadFailureException(
+                source = downloadAuthMode.toFailureSource(),
+                stage = DownloadFailureStage.Unknown,
+                userMessage = "Steam 内容下载失败，请稍后重试",
+            )
     }
 
     fun login(username: String, password: String, rememberSession: Boolean) {
@@ -2915,18 +2970,19 @@ class SteamSessionManager @Inject constructor(
             lastFailure: String?,
         ) -> Unit,
     ) {
+        val failureSource = contentAccess.authMode.toFailureSource()
         val candidateServers = prioritizeServersByUserPreference(
             servers = contentAccess.servers,
             preference = cdnPoolPreference,
         ).filter { server ->
             contentAccess.allowInsecureTransport || server.protocol.name.equals("HTTPS", ignoreCase = true)
         }
-        check(candidateServers.isNotEmpty()) {
-            if (contentAccess.allowInsecureTransport) {
-                "${contentAccess.accessLabel} 没有可用的 Steam CDN 路由"
-            } else {
-                "${contentAccess.accessLabel} 没有可用的 HTTPS Steam CDN 路由"
-            }
+        if (candidateServers.isEmpty()) {
+            throw noCdnRouteFailure(
+                accessLabel = contentAccess.accessLabel,
+                failureSource = failureSource,
+                httpsOnly = !contentAccess.allowInsecureTransport,
+            )
         }
         val transportClients = createTransportClients(
             transportModes = transportModes,
@@ -2956,12 +3012,12 @@ class SteamSessionManager @Inject constructor(
                 httpsServerCount = candidateServers.count { it.protocol.name.equals("HTTPS", ignoreCase = true) },
                 selectedRouteCount = routes.size,
             )
-            check(routes.isNotEmpty()) {
-                if (contentAccess.allowInsecureTransport) {
-                    "${contentAccess.accessLabel} 没有可用的 Steam CDN 路由"
-                } else {
-                    "${contentAccess.accessLabel} 没有可用的 HTTPS Steam CDN 路由"
-                }
+            if (routes.isEmpty()) {
+                throw noCdnRouteFailure(
+                    accessLabel = contentAccess.accessLabel,
+                    failureSource = failureSource,
+                    httpsOnly = !contentAccess.allowInsecureTransport,
+                )
             }
 
             val sourceAddress = "steam://publishedfile/${item.publishedFileId} · manifest $manifestId"
@@ -2975,32 +3031,69 @@ class SteamSessionManager @Inject constructor(
                 null,
             )
 
-            val (manifest, manifestRoute) = loadManifestFromRoutes(
-                taskId = taskId,
-                routes = routes,
-                depotId = depotId,
-                manifestId = manifestId,
-                contentAccess = contentAccess,
-                raceRouteCount = executionProfile.manifestRaceRouteCount,
-                preferChunkAwareSelection = executionProfile.preferChunkAwareSelection,
-            )
+            val (manifest, manifestRoute) = try {
+                loadManifestFromRoutes(
+                    taskId = taskId,
+                    routes = routes,
+                    depotId = depotId,
+                    manifestId = manifestId,
+                    contentAccess = contentAccess,
+                    raceRouteCount = executionProfile.manifestRaceRouteCount,
+                    preferChunkAwareSelection = executionProfile.preferChunkAwareSelection,
+                )
+            } catch (throwable: Throwable) {
+                if (throwable.isPauseSignal()) throw throwable
+                if (throwable.isNoCdnRouteFailureLike()) {
+                    throw throwable.toDownloadFailureException(
+                        source = failureSource,
+                        stage = DownloadFailureStage.CdnRouteSelection,
+                        userMessage = noCdnRouteMessage(
+                            accessLabel = contentAccess.accessLabel,
+                            httpsOnly = !contentAccess.allowInsecureTransport,
+                        ),
+                        reasonOverride = DownloadFailureReason.NoCdnRoute,
+                    )
+                }
+                throw throwable.toDownloadFailureException(
+                    source = failureSource,
+                    stage = DownloadFailureStage.CdnManifest,
+                    userMessage = "${contentAccess.accessLabel} manifest 获取失败，请稍后重试",
+                )
+            }
             if (!executionProfile.preferChunkAwareSelection) {
                 rememberSuccessfulCdnRoute(manifestRoute)
             }
 
-            downloadManifestFiles(
-                manifest = manifest,
-                depotId = depotId,
-                routes = routes,
-                depotKey = contentAccess.depotKey,
-                storageRoot = storageRoot,
-                taskId = taskId,
-                chunkPrefetchCount = performanceProfile.chunkConcurrency,
-                maxActiveRoutes = executionProfile.maxActiveRoutes,
-                preferChunkAwareSelection = executionProfile.preferChunkAwareSelection,
-                shouldPause = shouldPause,
-                onProgress = onProgress,
-            )
+            try {
+                downloadManifestFiles(
+                    manifest = manifest,
+                    depotId = depotId,
+                    routes = routes,
+                    depotKey = contentAccess.depotKey,
+                    storageRoot = storageRoot,
+                    taskId = taskId,
+                    chunkPrefetchCount = performanceProfile.chunkConcurrency,
+                    maxActiveRoutes = executionProfile.maxActiveRoutes,
+                    preferChunkAwareSelection = executionProfile.preferChunkAwareSelection,
+                    shouldPause = shouldPause,
+                    onProgress = onProgress,
+                )
+            } catch (throwable: Throwable) {
+                if (throwable.isPauseSignal()) throw throwable
+                if (throwable.isStorageFailureLike()) {
+                    throw throwable.toDownloadFailureException(
+                        source = DownloadFailureSource.Storage,
+                        stage = DownloadFailureStage.ExportFile,
+                        userMessage = "文件导出失败，请检查存储目录权限和可用空间",
+                        reasonOverride = DownloadFailureReason.StorageUnavailable,
+                    )
+                }
+                throw throwable.toDownloadFailureException(
+                    source = failureSource,
+                    stage = DownloadFailureStage.CdnChunk,
+                    userMessage = "${contentAccess.accessLabel} 分块下载失败，请稍后重试",
+                )
+            }
 
             rememberSuccessfulCdnRoute(
                 selectPreferredCdnRoutes(
@@ -3447,16 +3540,22 @@ class SteamSessionManager @Inject constructor(
             val durationMs = (System.currentTimeMillis() - startedAt).toString()
             when {
                 throwable is TimeoutCancellationException -> {
+                    val failure = throwable.toDownloadFailureException(
+                        source = stageFailureSource(stage),
+                        stage = stageFailureStage(stage),
+                        userMessage = timeoutMessage,
+                        reasonOverride = DownloadFailureReason.Timeout,
+                    )
                     supportDiagnosticsStore.recordDownloadEvent(
                         action = "${stage}_failure",
                         taskId = taskId,
-                        fields = fields + mapOf(
+                        fields = fields + failure.info.toDiagnosticsFields() + mapOf(
                             "durationMs" to durationMs,
                             "message" to timeoutMessage,
                             "timeout" to "true",
                         ),
                     )
-                    throw IllegalStateException(timeoutMessage, throwable)
+                    throw failure
                 }
 
                 throwable.isPauseSignal() || (throwable is CancellationException && !coroutineContext.isActive) -> {
@@ -3469,18 +3568,118 @@ class SteamSessionManager @Inject constructor(
                 }
 
                 else -> {
+                    val failure = throwable.toDownloadFailureException(
+                        source = stageFailureSource(stage),
+                        stage = stageFailureStage(stage),
+                        userMessage = stageFailureUserMessage(stage, timeoutMessage),
+                    )
                     supportDiagnosticsStore.recordDownloadEvent(
                         action = "${stage}_failure",
                         taskId = taskId,
-                        fields = fields + mapOf(
+                        fields = fields + failure.info.toDiagnosticsFields() + mapOf(
                             "durationMs" to durationMs,
-                            "message" to readableMessage(throwable),
+                            "message" to failure.info.userMessage,
                         ),
                     )
-                    throw throwable
+                    throw failure
                 }
             }
         }
+    }
+
+    private suspend fun exportWorkshopDownloadResult(
+        storageRoot: WorkshopStorageRoot,
+        treeUri: String?,
+        downloadFolderName: String?,
+        onPhaseChanged: suspend (String?) -> Unit,
+    ): WorkshopExportResult {
+        return try {
+            storageRoot.exportResultUri(
+                treeUri = treeUri,
+                downloadFolderName = downloadFolderName,
+                onPhaseChanged = onPhaseChanged,
+            )
+        } catch (throwable: Throwable) {
+            throw throwable.toDownloadFailureException(
+                source = DownloadFailureSource.Storage,
+                stage = DownloadFailureStage.ExportFile,
+                userMessage = "文件导出失败，请检查存储目录权限和可用空间",
+                reasonOverride = DownloadFailureReason.StorageUnavailable,
+            )
+        }
+    }
+
+    private fun DownloadAuthMode.toFailureSource(): DownloadFailureSource {
+        return when (this) {
+            DownloadAuthMode.Anonymous -> DownloadFailureSource.SteamAnonymous
+            DownloadAuthMode.Auto,
+            DownloadAuthMode.Authenticated,
+            -> DownloadFailureSource.SteamAuthenticated
+        }
+    }
+
+    private fun stageFailureSource(stage: String): DownloadFailureSource {
+        return when (stage) {
+            "anonymous_content_access" -> DownloadFailureSource.SteamAnonymous
+            "authenticated_session_restore",
+            "authenticated_depot_lookup",
+            "authenticated_depot_key",
+            "authenticated_manifest_request",
+            "authenticated_cdn_servers",
+            -> DownloadFailureSource.SteamAuthenticated
+            else -> DownloadFailureSource.Unknown
+        }
+    }
+
+    private fun stageFailureStage(stage: String): DownloadFailureStage {
+        return when (stage) {
+            "anonymous_content_access" -> DownloadFailureStage.AnonymousContentAccess
+            "authenticated_session_restore" -> DownloadFailureStage.AuthenticatedSessionRestore
+            "authenticated_depot_lookup" -> DownloadFailureStage.AuthenticatedDepotLookup
+            "authenticated_depot_key" -> DownloadFailureStage.AuthenticatedDepotKey
+            "authenticated_manifest_request" -> DownloadFailureStage.AuthenticatedManifestRequest
+            "authenticated_cdn_servers" -> DownloadFailureStage.AuthenticatedCdnServers
+            else -> DownloadFailureStage.Unknown
+        }
+    }
+
+    private fun stageFailureUserMessage(
+        stage: String,
+        timeoutMessage: String,
+    ): String {
+        return when (stage) {
+            "anonymous_content_access" -> "获取匿名 Steam 内容访问失败，请检查当前网络后重试"
+            "authenticated_session_restore" -> "恢复 Steam 登录失败，请检查当前网络、代理或 VPN 设置后重试"
+            "authenticated_depot_lookup" -> "获取 Workshop depot 信息失败，请稍后重试"
+            "authenticated_depot_key" -> "获取已登录下载密钥失败，请稍后重试"
+            "authenticated_manifest_request" -> "获取 Steam manifest 访问码失败，请稍后重试"
+            "authenticated_cdn_servers" -> "获取 Steam CDN 列表失败，请检查当前网络后重试"
+            else -> timeoutMessage.ifBlank { "Steam 内容下载失败，请稍后重试" }
+        }
+    }
+
+    private fun noCdnRouteMessage(
+        accessLabel: String,
+        httpsOnly: Boolean,
+    ): String {
+        return if (httpsOnly) {
+            "$accessLabel 没有可用的 HTTPS Steam CDN 路由"
+        } else {
+            "$accessLabel 没有可用的 Steam CDN 路由"
+        }
+    }
+
+    private fun noCdnRouteFailure(
+        accessLabel: String,
+        failureSource: DownloadFailureSource,
+        httpsOnly: Boolean,
+    ): DownloadFailureException {
+        return IllegalStateException(noCdnRouteMessage(accessLabel, httpsOnly)).toDownloadFailureException(
+            source = failureSource,
+            stage = DownloadFailureStage.CdnRouteSelection,
+            userMessage = noCdnRouteMessage(accessLabel, httpsOnly),
+            reasonOverride = DownloadFailureReason.NoCdnRoute,
+        )
     }
 
     private fun getCachedWorkshopItem(

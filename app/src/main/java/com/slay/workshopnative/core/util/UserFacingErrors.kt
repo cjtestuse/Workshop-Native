@@ -3,6 +3,7 @@ package com.slay.workshopnative.core.util
 import kotlinx.coroutines.CancellationException
 
 fun Throwable.toUserMessage(fallback: String): String {
+    findDownloadFailureInfo()?.let { return it.userMessage }
     val rawMessage = message?.trim().orEmpty()
     if (this is CancellationException) return "操作已取消"
     if (rawMessage.isBlank()) return fallback
@@ -27,6 +28,6 @@ fun Throwable.toUserMessage(fallback: String): String {
             "网络连接失败，请检查当前网络、代理或 VPN 设置"
         }
 
-        else -> rawMessage
+        else -> sanitizeMessageForDisplay(rawMessage).ifBlank { fallback }
     }
 }

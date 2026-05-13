@@ -5,10 +5,13 @@ import java.security.MessageDigest
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 private val HTTP_URL_REGEX = Regex("""https?://[^\s]+""", RegexOption.IGNORE_CASE)
+private val CONTENT_URI_REGEX = Regex("""(?:content|document|file)://[^\s]+""", RegexOption.IGNORE_CASE)
 private val STEAM_PROFILE_REGEX = Regex(
     """(https://steamcommunity\.com/profiles/)\d+""",
     RegexOption.IGNORE_CASE,
 )
+private val UNIX_PATH_REGEX = Regex("""/(?:data|storage|sdcard|mnt|var|private|Users|home|tmp)[^\s]*""")
+private val WINDOWS_PATH_REGEX = Regex("""(?i)\b[A-Z]:\\[^\s]+""")
 
 fun buildAccountBindingHash(
     accountName: String?,
@@ -82,4 +85,15 @@ fun sanitizeRuntimeSourceAddress(sourceAddress: String?): String? {
             append(httpUrl.port)
         }
     }
+}
+
+fun sanitizeMessageForDisplay(message: String?): String {
+    val rawValue = message?.trim().orEmpty()
+    if (rawValue.isBlank()) return ""
+
+    return sanitizeOkHttpLogMessage(rawValue)
+        .let { CONTENT_URI_REGEX.replace(it, "{uri}") }
+        .let { WINDOWS_PATH_REGEX.replace(it, "{path}") }
+        .let { UNIX_PATH_REGEX.replace(it, "{path}") }
+        .trim()
 }
